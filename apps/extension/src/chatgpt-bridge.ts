@@ -32,17 +32,25 @@ function setComposerValue(composer: HTMLTextAreaElement | HTMLElement, text: str
   if (composer instanceof HTMLTextAreaElement) { const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set; if (!setter) throw new Error("Unable to set ChatGPT composer value"); setter.call(composer, text); composer.dispatchEvent(new Event("input", { bubbles: true })); return; }
   composer.textContent = text; composer.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
 }
+function findSendButton(): HTMLButtonElement | null {
+  return document.querySelector<HTMLButtonElement>('button[data-testid="send-button"]:not([disabled]), button[aria-label="Send prompt"]:not([disabled]), button[aria-label="Send message"]:not([disabled])');
+}
 async function submitToChatGPT(text: string): Promise<void> {
   emit({ type: "state.changed", state: "submitting-prompt" });
   const composer = getComposer();
   if (!composer) throw new Error("ChatGPT composer was not found. Open a normal ChatGPT conversation.");
   setComposerValue(composer, text);
-  await new Promise((resolve) => setTimeout(resolve, 300));
-  const sendButton = document.querySelector<HTMLButtonElement>('button[data-testid="send-button"], button[aria-label="Send prompt"], button[aria-label="Send message"]');
-  if (sendButton && !sendButton.disabled) sendButton.click();
-  else {
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  const button = findSendButton();
+  if (button) {
+    button.click();
+    emit({ type: "state.changed", state: "prompt-submitted" });
+  } else {
+    composer.focus();
     composer.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true, cancelable: true }));
+    await new Promise((resolve) => setTimeout(resolve, 100));
     composer.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", bubbles: true }));
+    emit({ type: "state.changed", state: "prompt-submitted-enter" });
   }
   await new Promise((resolve) => setTimeout(resolve, 700));
 }
@@ -51,16 +59,20 @@ function assistantMessages(): AssistantMessage[] {
   if (roleNodes.length > 0) return roleNodes.map((node) => ({ text: node.innerText.trim(), node })).filter((item) => item.text.length > 0);
   return Array.from(document.querySelectorAll<HTMLElement>("article")).map((node) => ({ text: node.innerText.trim(), node })).filter((item) => item.text.length > 0);
 }
-async function waitForAssistantResponse(previousNode: HTMLElement | null): Promise<string> {
+async function waitForAssistantResponse(previousNode: HTMLElement | null, previousText: string): Promise<string> {
   emit({ type: "state.changed", state: "waiting-assistant" });
   const started = Date.now(); let lastText = ""; let stableSince = 0;
   while (Date.now() - started < RESPONSE_TIMEOUT_MS) {
     const messages = assistantMessages();
     const current = messages[messages.length - 1];
-    if (current && current.node !== previousNode) {
+    if (current) {
       const text = current.text;
-      if (text && text !== lastText) { lastText = text; stableSince = Date.now(); }
-      if (lastText && stableSince > 0 && Date.now() - stableSince >= 1200) return lastText;
+      const isNewNode = current.node !== previousNode;
+      const isChangedExistingNode = current.node === previousNode && text.length > previousText.length && text !== previousText;
+      if ((isNewNode || isChangedExistingNode) && text) {
+        if (text !== lastText) { lastText = text; stableSince = Date.now(); }
+        if (lastText && stableSince > 0 && Date.now() - stableSince >= 1200) return lastText;
+      }
     }
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
@@ -86,14 +98,14 @@ async function runAgent(workspace: string, goal: string): Promise<void> {
     const tools: RuntimeToolDescription[] = Array.isArray(toolsResponse.result) ? toolsResponse.result as RuntimeToolDescription[] : [];
     const history: Array<{ call: ToolCall; result: ToolResult }> = [];
     for (let round = 0; round < MAX_ROUNDS; round += 1) {
-      const beforeNode = assistantMessages().at(-1)?.node ?? null;
+      const previous = assistantMessages().at(-1);
       await submitToChatGPT(plannerPrompt(goal, tools, history));
-      const responseText = await waitForAssistantResponse(beforeNode);
+      const responseText = await waitForAssistantResponse(previous?.node ?? null, previous?.text ?? "");
       const plan = parseToolPlan(responseText);
       if (plan.done) {
-        const finalBefore = assistantMessages().at(-1)?.node ?? null;
+        const finalBefore = assistantMessages().at(-1);
         await submitToChatGPT(finalPrompt(goal, history));
-        await waitForAssistantResponse(finalBefore);
+        await waitForAssistantResponse(finalBefore?.node ?? null, finalBefore?.text ?? "");
         emit({ type: "state.changed", state: "completed" }); return;
       }
       emit({ type: "state.changed", state: "inspecting" });
