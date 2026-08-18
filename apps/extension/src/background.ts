@@ -15,7 +15,16 @@ async function openApprovalWindow(): Promise<void> {
   await chrome.windows.create({ url, type: "popup", width: 440, height: 620 });
 }
 async function notifyApproval(): Promise<void> {
-  try { await chrome.notifications.create(`approval-${currentApproval?.requestId}`, { type: "basic", title: "Browser Coding Agent", message: `需要授权：${currentApproval?.tool ?? "tool"}`, priority: 2 }); } catch (error) { log("notification failed", error); }
+  try {
+    const options: chrome.notifications.NotificationOptions = {
+      type: "basic",
+      iconUrl: chrome.runtime.getURL("icon.svg"),
+      title: "Browser Coding Agent",
+      message: `需要授权：${currentApproval?.tool ?? "tool"}`,
+      priority: 2,
+    };
+    await chrome.notifications.create(`approval-${currentApproval?.requestId}`, options);
+  } catch (error) { log("notification failed", error); }
 }
 function connectRuntime(): WebSocket {
   if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return socket;
