@@ -1,48 +1,44 @@
-import { formatApprovalCommand, type ApprovalRequest, type ApprovalResponse } from "./approval.js";
+type AgentEvent = { type: "state.changed" | "tool.call" | "tool.result"; state?: string; call?: { tool: string; arguments: unknown }; result?: { ok: boolean; error?: string; result?: unknown } };
 
-const status = document.querySelector<HTMLDivElement>("#status")!;
-const approval = document.querySelector<HTMLDivElement>("#approval")!;
-const description = document.querySelector<HTMLParagraphElement>("#description")!;
-const command = document.querySelector<HTMLDivElement>("#command")!;
-const risk = document.querySelector<HTMLSpanElement>("#risk")!;
-const deny = document.querySelector<HTMLButtonElement>("#deny")!;
-const allow = document.querySelector<HTMLButtonElement>("#allow")!;
-const session = document.querySelector<HTMLButtonElement>("#session")!;
+const connection = document.querySelector<HTMLDivElement>("#connection")!;
+const goal = document.querySelector<HTMLTextAreaElement>("#goal")!;
+const run = document.querySelector<HTMLButtonElement>("#run")!;
+const events = document.querySelector<HTMLDivElement>("#events")!;
 
-let current: ApprovalRequest | undefined;
-
-function showRequest(request: ApprovalRequest): void {
-  current = request;
-  status.classList.add("hidden");
-  approval.classList.remove("hidden");
-  description.textContent = request.description;
-  command.textContent = formatApprovalCommand(request);
-  risk.textContent = request.risk.toUpperCase();
+function addEvent(text: string, state?: string): void {
+  if (events.children.length === 1 && events.textContent === "等待任务…") events.innerHTML = "";
+  const item = document.createElement("div"); item.className = "event";
+  if (state) { const badge = document.createElement("span"); badge.className = "state"; badge.textContent = state; item.append(badge, document.createTextNode(` ${text}`)); }
+  else item.textContent = text;
+  events.prepend(item);
 }
-
-function respond(decision: ApprovalResponse["decision"]): void {
-  if (!current) return;
-  const requestId = current.requestId;
-  chrome.runtime.sendMessage({ type: "approval.respond", requestId, decision }, () => {
-    if (chrome.runtime.lastError) status.textContent = chrome.runtime.lastError.message ?? "发送失败";
-    else status.textContent = decision === "deny" ? "已拒绝" : "已授权，正在执行…";
-    status.classList.remove("hidden");
-    approval.classList.add("hidden");
-    current = undefined;
-  });
-}
-
-deny.addEventListener("click", () => respond("deny"));
-allow.addEventListener("click", () => respond("allow_once"));
-session.addEventListener("click", () => respond("allow_session"));
-
-chrome.runtime.sendMessage({ type: "approval.current" }, (response?: { request?: ApprovalRequest }) => {
-  if (response?.request) showRequest(response.request);
-  else status.textContent = "Runtime 已连接。等待 Agent 请求授权。";
-});
 
 chrome.runtime.onMessage.addListener((message: unknown) => {
   if (!message || typeof message !== "object") return;
-  const event = message as { type?: string; request?: ApprovalRequest };
-  if (event.type === "approval.request" && event.request) showRequest(event.request);
+  const event = message as { type?: string; params?: AgentEvent };
+  if (event.type === "agent.event" && event.params) {
+    const e = event.params;
+    if (e.type === "state.changed") addEvent("状态变化", e.state);
+    else if (e.type === "tool.call") addEvent(`调用 ${e.call?.tool ?? "tool"}`);
+    else if (e.type === "tool.result") addEvent(e.result?.ok ? `完成 ${e.call?.tool ?? "tool"}` : `失败：${e.result?.error ?? "unknown error"}`);
+  }
+});
+
+function startAgent(): void {
+  const text = goal.value.trim();
+  if (!text) { goal.focus(); return; }
+  run.disabled = true;
+  addEvent(`任务：${text}`);
+  chrome.runtime.sendMessage({ jsonrpc: "2.0", id: crypto.randomUUID(), method: "agent.run", params: { goal: text } }, (response) => {
+    run.disabled = false;
+    if (chrome.runtime.lastError) addEvent(`请求失败：${chrome.runtime.lastError.message}`);
+    else if (response?.error) addEvent(`Agent 失败：${response.error.message ?? "unknown error"}`);
+    else addEvent(`Agent 已结束：${response?.result?.state ?? "completed"}`);
+  });
+}
+
+run.addEventListener("click", startAgent);
+goal.addEventListener("keydown", (event) => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter") startAgent(); });
+chrome.runtime.sendMessage({ jsonrpc: "2.0", id: crypto.randomUUID(), method: "runtime.ping" }, (response) => {
+  connection.textContent = response?.result?.ok ? "Runtime 已连接" : "Runtime 未连接";
 });
