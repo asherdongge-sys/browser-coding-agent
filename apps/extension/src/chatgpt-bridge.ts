@@ -109,9 +109,17 @@ function resultSummaryPrompt(goal: string, history: Array<{ call: ToolCall; resu
   ].join("\n\n");
 }
 
-async function runAgent(goal: string, workspace: string, status: HTMLElement): Promise<void> {
+function renderFinalResult(output: HTMLElement, text: string): void {
+  output.hidden = false;
+  output.textContent = text;
+  output.scrollTop = output.scrollHeight;
+}
+
+async function runAgent(goal: string, workspace: string, status: HTMLElement, output: HTMLElement): Promise<void> {
   if (running) return;
   running = true;
+  output.hidden = true;
+  output.textContent = "";
   try {
     const selected = await runtimeRpc({ jsonrpc: "2.0", id: crypto.randomUUID(), method: "workspace.select", params: { path: workspace } });
     if (selected.error) throw new Error(selected.error.message ?? "Workspace selection failed");
@@ -129,7 +137,8 @@ async function runAgent(goal: string, workspace: string, status: HTMLElement): P
         status.textContent = "正在生成最终结果…";
         const finalArticlesBefore = assistantArticles().length;
         await submitToChatGPT(resultSummaryPrompt(goal, history));
-        await waitForAssistantResponse(finalArticlesBefore);
+        const finalText = await waitForAssistantResponse(finalArticlesBefore);
+        renderFinalResult(output, finalText);
         status.textContent = "Agent 已完成";
         return;
       }
@@ -150,18 +159,19 @@ function mountPanel(): void {
   const panel = document.createElement("section");
   panel.id = PANEL_ID;
   panel.style.cssText = "position:fixed;right:16px;bottom:16px;z-index:2147483647;width:360px;padding:14px;border:1px solid #d1d5db;border-radius:12px;background:#fff;color:#111827;box-shadow:0 12px 40px rgba(0,0,0,.18);font:13px system-ui,sans-serif";
-  panel.innerHTML = `<strong>Browser Coding Agent</strong><div style="margin-top:8px"><input id="bca-workspace" placeholder="本地工作区，例如 E:\\web\\project" style="width:100%;box-sizing:border-box;padding:8px;border:1px solid #d1d5db;border-radius:8px"></div><div style="margin-top:8px"><textarea id="bca-goal" placeholder="告诉 ChatGPT 你要开发什么…" rows="4" style="width:100%;box-sizing:border-box;padding:8px;border:1px solid #d1d5db;border-radius:8px;resize:vertical"></textarea></div><button id="bca-start" style="margin-top:8px;width:100%;padding:8px;border:0;border-radius:8px;background:#111827;color:#fff;cursor:pointer">开始 Agent</button><div id="bca-status" style="margin-top:8px;color:#4b5563">等待任务…</div>`;
+  panel.innerHTML = `<strong>Browser Coding Agent</strong><div style="margin-top:8px"><input id="bca-workspace" placeholder="本地工作区，例如 E:\\web\\project" style="width:100%;box-sizing:border-box;padding:8px;border:1px solid #d1d5db;border-radius:8px"></div><div style="margin-top:8px"><textarea id="bca-goal" placeholder="告诉 ChatGPT 你要开发什么…" rows="4" style="width:100%;box-sizing:border-box;padding:8px;border:1px solid #d1d5db;border-radius:8px;resize:vertical"></textarea></div><button id="bca-start" style="margin-top:8px;width:100%;padding:8px;border:0;border-radius:8px;background:#111827;color:#fff;cursor:pointer">开始 Agent</button><div id="bca-status" style="margin-top:8px;color:#4b5563">等待任务…</div><pre id="bca-output" hidden style="margin-top:10px;max-height:240px;overflow:auto;white-space:pre-wrap;word-break:break-word;padding:10px;border-radius:8px;background:#f3f4f6"></pre>`;
   document.body.append(panel);
   const workspaceInput = panel.querySelector<HTMLInputElement>("#bca-workspace")!;
   const goalInput = panel.querySelector<HTMLTextAreaElement>("#bca-goal")!;
   const button = panel.querySelector<HTMLButtonElement>("#bca-start")!;
   const status = panel.querySelector<HTMLDivElement>("#bca-status")!;
+  const output = panel.querySelector<HTMLPreElement>("#bca-output")!;
   chrome.storage.local.get(WORKSPACE_KEY, (value) => { if (typeof value[WORKSPACE_KEY] === "string") workspaceInput.value = value[WORKSPACE_KEY] as string; });
   button.addEventListener("click", () => {
     const workspace = workspaceInput.value.trim(); const goal = goalInput.value.trim();
     if (!workspace || !goal) { status.textContent = "请填写工作区和任务"; return; }
     chrome.storage.local.set({ [WORKSPACE_KEY]: workspace }); button.disabled = true;
-    void runAgent(goal, workspace, status).catch((error: unknown) => { status.textContent = `Agent 失败：${error instanceof Error ? error.message : String(error)}`; }).finally(() => { button.disabled = false; });
+    void runAgent(goal, workspace, status, output).catch((error: unknown) => { status.textContent = `Agent 失败：${error instanceof Error ? error.message : String(error)}`; }).finally(() => { button.disabled = false; });
   });
 }
 
