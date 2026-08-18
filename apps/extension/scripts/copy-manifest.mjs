@@ -1,10 +1,10 @@
 import { cp, mkdir } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
 const destination = resolve(root, "dist");
-
 await mkdir(destination, { recursive: true });
-await cp(resolve(root, "manifest.json"), resolve(destination, "manifest.json"));
-await cp(resolve(root, "src", "popup.html"), resolve(destination, "popup.html"));
+for (const asset of ["manifest.json", "src/popup.html", "src/approval.html"]) {
+  await cp(resolve(root, asset), resolve(destination, asset.split("/").pop()));
+}
 console.log(`Copied extension assets to ${destination}`);
