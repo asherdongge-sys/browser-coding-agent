@@ -4,7 +4,6 @@ import { AgentLoop, type AgentEvent, type AgentContext } from "@browser-coding-a
 import type { ApprovalResponse, RpcMessage, ToolCall, ToolResult } from "@browser-coding-agent/protocol";
 import { PermissionManager } from "@browser-coding-agent/permissions";
 import { ToolRegistry, WorkspaceManager, createFilesystemTools, createTerminalTools } from "@browser-coding-agent/tools";
-import { createLlmPlanner, getLlmPlannerConfig } from "./llm.js";
 
 export const DEFAULT_PORT = 4317;
 type PendingApproval = { socket: WebSocket | undefined; id: string | number | undefined; call: ToolCall; toolName: string; resolve: (result: ToolResult<unknown>) => void };
@@ -20,7 +19,7 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
 
   const httpServer = createServer((_request, response) => {
     response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({ name: "browser-coding-agent", protocol: "0.1", workspace: safeWorkspaceRoot(workspace), clients: clients.size, llm: getLlmPlannerConfig() !== null }));
+    response.end(JSON.stringify({ name: "browser-coding-agent", protocol: "0.1", workspace: safeWorkspaceRoot(workspace), clients: clients.size, planner: "chatgpt-browser" }));
   });
   const wsServer = new WebSocketServer({ server: httpServer });
   const broadcast = (message: unknown): void => { const payload = JSON.stringify(message); for (const client of clients) safeSend(client, payload); };
@@ -68,9 +67,6 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
     return [];
   };
 
-  const llmConfig = getLlmPlannerConfig();
-  const planner = llmConfig ? createLlmPlanner(llmConfig, tools.list()) : deterministicPlanner;
-
   wsServer.on("connection", (socket) => {
     clients.add(socket);
     socket.on("message", async (raw: Buffer) => {
@@ -95,19 +91,19 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
       if (!("method" in message) || !("id" in message)) return;
       const id = message.id;
       try {
-        if (message.method === "runtime.ping") { reply(socket, id, { ok: true, protocol: "0.1", llm: llmConfig !== null }); return; }
+        if (message.method === "runtime.ping") { reply(socket, id, { ok: true, protocol: "0.1", planner: "chatgpt-browser" }); return; }
         if (message.method === "workspace.select") { const params = asRecord(message.params); reply(socket, id, { root: workspace.select(requiredString(params.path, "path")) }); return; }
         if (message.method === "workspace.info") { reply(socket, id, { root: safeWorkspaceRoot(workspace) }); return; }
         if (message.method === "tools.list") { reply(socket, id, tools.list()); return; }
-        if (message.method === "tool.call") { const params = asRecord(message.params); const call = params.call as ToolCall | undefined; if (!call || typeof call.tool !== "string") throw new Error("call.tool is required"); reply(socket, id, await executeTool(call, socket, id)); return; }
+        if (message.method === "tool.call") { const params = asRecord(message.params); const call = params.call as ToolCall | undefined; if (!call || typeof call.tool !== "string") throw new Error("call.tool is required"); if (safeWorkspaceRoot(workspace) === null) throw new Error("No workspace selected"); reply(socket, id, await executeTool(call, socket, id)); return; }
         if (message.method === "agent.run") {
           const params = asRecord(message.params); const goal = requiredString(params.goal, "goal");
           if (safeWorkspaceRoot(workspace) === null) { reply(socket, id, undefined, { code: -32001, message: "No workspace selected" }); return; }
           void (async () => {
             try {
-              const loop = new AgentLoop({ callTool: (call) => executeTool(call) }, planner);
+              const loop = new AgentLoop({ callTool: (call) => executeTool(call) }, deterministicPlanner);
               await loop.run({ goal, history: [] }, emitAgentEvent);
-              reply(socket, id, { ok: loop.getState() === "completed", state: loop.getState(), planner: llmConfig ? "llm" : "deterministic" });
+              reply(socket, id, { ok: loop.getState() === "completed", state: loop.getState(), planner: "deterministic" });
             } catch (error) { reply(socket, id, undefined, { code: -32000, message: error instanceof Error ? error.message : String(error) }); }
           })();
           return;
