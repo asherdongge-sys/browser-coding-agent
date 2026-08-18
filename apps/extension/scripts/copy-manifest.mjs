@@ -2,9 +2,9 @@ import { cp, mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
-const source = resolve(root, "manifest.json");
-const destination = resolve(root, "dist", "manifest.json");
+const destination = resolve(root, "dist");
 
-await mkdir(dirname(destination), { recursive: true });
-await cp(source, destination);
-console.log(`Copied manifest to ${destination}`);
+await mkdir(destination, { recursive: true });
+await cp(resolve(root, "manifest.json"), resolve(destination, "manifest.json"));
+await cp(resolve(root, "src", "popup.html"), resolve(destination, "popup.html"));
+console.log(`Copied extension assets to ${destination}`);
