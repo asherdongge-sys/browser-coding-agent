@@ -29,11 +29,11 @@ function connectRuntime(): WebSocket {
     if (!message || typeof message !== "object") return;
     const data = message as { method?: string; params?: Partial<ApprovalRequest> };
     log("runtime message", data.method ?? "response");
-    if (data.method !== "approval.request" || !data.params?.requestId || !data.params.tool || !data.params.risk || !data.params.description) return;
-    currentApproval = { requestId: data.params.requestId, tool: data.params.tool, risk: data.params.risk, description: data.params.description, arguments: data.params.arguments };
-    log("approval request", currentApproval);
-    broadcast({ type: "approval.request", request: currentApproval });
-    void openApprovalWindow();
+    if (data.method === "approval.request" && data.params?.requestId && data.params.tool && data.params.risk && data.params.description) {
+      currentApproval = { requestId: data.params.requestId, tool: data.params.tool, risk: data.params.risk, description: data.params.description, arguments: data.params.arguments };
+      log("approval request", currentApproval); broadcast({ type: "approval.request", request: currentApproval }); void openApprovalWindow(); return;
+    }
+    if (data.method === "agent.event") broadcast({ type: "agent.event", params: data.params });
   });
   ws.addEventListener("close", () => { if (socket === ws) socket = undefined; log("runtime disconnected"); });
   ws.addEventListener("error", (event) => log("runtime socket error", event));
@@ -41,10 +41,7 @@ function connectRuntime(): WebSocket {
 }
 function sendToRuntime(message: Record<string, unknown>, sendResponse: (response: unknown) => void): void {
   const ws = connectRuntime();
-  const send = () => {
-    if (ws.readyState !== WebSocket.OPEN) { sendResponse({ ok: false, error: "Runtime WebSocket is not open" }); return; }
-    ws.send(JSON.stringify(message)); sendResponse({ ok: true });
-  };
+  const send = () => { if (ws.readyState !== WebSocket.OPEN) { sendResponse({ ok: false, error: "Runtime WebSocket is not open" }); return; } ws.send(JSON.stringify(message)); sendResponse({ ok: true }); };
   if (ws.readyState === WebSocket.OPEN) send(); else ws.addEventListener("open", send, { once: true });
 }
 chrome.runtime.onInstalled.addListener(() => { log("service worker installed"); connectRuntime(); });
@@ -64,3 +61,5 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
   if ("jsonrpc" in request) { sendToRuntime(request, sendResponse); return true; }
   return false;
 });
+
+export {};
