@@ -1,12 +1,12 @@
 import { createServer } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
-import type { ApprovalResponse, RpcMessage, ToolCall } from "@browser-coding-agent/protocol";
+import { AgentLoop, type AgentEvent } from "@browser-coding-agent/agent-core";
+import type { ApprovalResponse, RpcMessage, ToolCall, ToolResult } from "@browser-coding-agent/protocol";
 import { PermissionManager } from "@browser-coding-agent/permissions";
 import { ToolRegistry, WorkspaceManager, createFilesystemTools, createTerminalTools } from "@browser-coding-agent/tools";
 
 export const DEFAULT_PORT = 4317;
-
-type PendingApproval = { socket: WebSocket; id: string | number; call: ToolCall; toolName: string };
+type PendingApproval = { socket?: WebSocket; id?: string | number; call: ToolCall; toolName: string; resolve: (result: ToolResult) => void };
 
 export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGENT_PORT ?? DEFAULT_PORT)) {
   const workspace = new WorkspaceManager();
@@ -22,10 +22,36 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
     response.end(JSON.stringify({ name: "browser-coding-agent", protocol: "0.1", workspace: safeWorkspaceRoot(workspace), clients: clients.size }));
   });
   const wsServer = new WebSocketServer({ server: httpServer });
+  const broadcast = (message: unknown): void => { const payload = JSON.stringify(message); for (const client of clients) safeSend(client, payload); };
+  const emitAgentEvent = (event: AgentEvent): void => broadcast({ jsonrpc: "2.0", method: "agent.event", params: event });
 
-  const broadcast = (message: unknown): void => {
-    const payload = JSON.stringify(message);
-    for (const client of clients) safeSend(client, payload);
+  const executeTool = (call: ToolCall, requester?: WebSocket, requestId?: string | number): Promise<ToolResult> => {
+    const tool = tools.get(call.tool);
+    if (!tool) return Promise.resolve({ ok: false, error: `Unknown tool: ${call.tool}` });
+    const decision = sessionAllowed.has(tool.descriptor.name) ? "allow" : permissions.decide({ tool: tool.descriptor.name, risk: tool.descriptor.risk, description: tool.descriptor.description });
+    if (decision === "ask") {
+      return new Promise<ToolResult>((resolve) => {
+        const approvalId = crypto.randomUUID();
+        pending.set(approvalId, { socket: requester, id: requestId, call, toolName: tool.descriptor.name, resolve });
+        broadcast({ jsonrpc: "2.0", method: "approval.request", params: { requestId: approvalId, tool: tool.descriptor.name, risk: tool.descriptor.risk, description: tool.descriptor.description, arguments: call.arguments } });
+      });
+    }
+    if (decision !== "allow") return Promise.resolve({ ok: false, error: `Permission ${decision} for ${tool.descriptor.name}` });
+    return tool.execute(call.arguments);
+  };
+
+  const planner = async (goal: string): Promise<readonly ToolCall[]> => {
+    const normalized = goal.toLowerCase();
+    if (normalized.includes("hello") && (normalized.includes("创建") || normalized.includes("create"))) {
+      return [
+        { tool: "fs.write", arguments: { path: "hello.ts", content: 'console.log("Hello from Browser Coding Agent");\n' } },
+        { tool: "terminal.exec", arguments: { command: "node hello.ts" } },
+      ];
+    }
+    return [
+      { tool: "fs.list", arguments: { path: "." } },
+      { tool: "fs.read", arguments: { path: "package.json" } },
+    ];
   };
 
   wsServer.on("connection", (socket) => {
@@ -33,21 +59,22 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
     socket.on("message", async (raw: Buffer) => {
       let message: RpcMessage;
       try { message = JSON.parse(raw.toString()) as RpcMessage; } catch { safeSend(socket, { jsonrpc: "2.0", id: "invalid", error: { code: -32700, message: "Invalid JSON" } }); return; }
-
       if ("method" in message && message.method === "approval.respond" && "id" in message) {
         let response: ApprovalResponse;
         try { response = asApprovalResponse(message.params); } catch (error) { reply(socket, message.id, undefined, { code: -32602, message: error instanceof Error ? error.message : String(error) }); return; }
         const request = pending.get(response.requestId);
         if (!request) { reply(socket, message.id, undefined, { code: -32004, message: "Approval request not found or already resolved" }); return; }
         pending.delete(response.requestId);
-        if (response.decision === "deny") { reply(request.socket, request.id, { ok: false, error: "Permission denied by user" }); reply(socket, message.id, { ok: true }); return; }
-        if (response.decision === "allow_session") sessionAllowed.add(request.toolName);
-        const tool = tools.get(request.toolName);
-        if (!tool) { reply(request.socket, request.id, { ok: false, error: "Tool no longer available" }); reply(socket, message.id, { ok: true }); return; }
-        try { reply(request.socket, request.id, await tool.execute(request.call.arguments)); } catch (error) { reply(request.socket, request.id, { ok: false, error: error instanceof Error ? error.message : String(error) }); }
-        reply(socket, message.id, { ok: true }); return;
+        if (response.decision === "deny") request.resolve({ ok: false, error: "Permission denied by user" });
+        else {
+          if (response.decision === "allow_session") sessionAllowed.add(request.toolName);
+          const tool = tools.get(request.toolName);
+          if (!tool) request.resolve({ ok: false, error: "Tool no longer available" });
+          else { try { request.resolve(await tool.execute(request.call.arguments)); } catch (error) { request.resolve({ ok: false, error: error instanceof Error ? error.message : String(error) }); } }
+        }
+        reply(socket, message.id, { ok: true });
+        return;
       }
-
       if (!("method" in message) || !("id" in message)) return;
       const id = message.id;
       try {
@@ -55,34 +82,27 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
         if (message.method === "workspace.select") { const params = asRecord(message.params); reply(socket, id, { root: workspace.select(requiredString(params.path, "path")) }); return; }
         if (message.method === "workspace.info") { reply(socket, id, { root: safeWorkspaceRoot(workspace) }); return; }
         if (message.method === "tools.list") { reply(socket, id, tools.list()); return; }
-        if (message.method === "tool.call") {
-          const params = asRecord(message.params); const call = params.call as ToolCall | undefined;
-          if (!call || typeof call.tool !== "string") throw new Error("call.tool is required");
-          const tool = tools.get(call.tool); if (!tool) throw new Error(`Unknown tool: ${call.tool}`);
-          const decision = sessionAllowed.has(tool.descriptor.name) ? "allow" : permissions.decide({ tool: tool.descriptor.name, risk: tool.descriptor.risk, description: tool.descriptor.description });
-          if (decision === "ask") {
-            const requestId = crypto.randomUUID();
-            pending.set(requestId, { socket, id, call, toolName: tool.descriptor.name });
-            broadcast({ jsonrpc: "2.0", method: "approval.request", params: { requestId, tool: tool.descriptor.name, risk: tool.descriptor.risk, description: tool.descriptor.description, arguments: call.arguments } });
-            return;
-          }
-          if (decision !== "allow") { reply(socket, id, { ok: false, error: `Permission ${decision} for ${tool.descriptor.name}` }); return; }
-          reply(socket, id, await tool.execute(call.arguments)); return;
+        if (message.method === "tool.call") { const params = asRecord(message.params); const call = params.call as ToolCall | undefined; if (!call || typeof call.tool !== "string") throw new Error("call.tool is required"); reply(socket, id, await executeTool(call, socket, id)); return; }
+        if (message.method === "agent.run") {
+          const params = asRecord(message.params); const goal = requiredString(params.goal, "goal");
+          void (async () => {
+            try {
+              const loop = new AgentLoop({ callTool: (call) => executeTool(call) }, async () => planner(goal));
+              await loop.run({ goal }, emitAgentEvent);
+              reply(socket, id, { ok: true, state: loop.getState() });
+            } catch (error) { reply(socket, id, undefined, { code: -32000, message: error instanceof Error ? error.message : String(error) }); }
+          })();
+          return;
         }
         reply(socket, id, undefined, { code: -32601, message: `Method not found: ${message.method}` });
       } catch (error) { reply(socket, id, undefined, { code: -32000, message: error instanceof Error ? error.message : String(error) }); }
     });
-    socket.on("close", () => {
-      clients.delete(socket);
-      for (const [requestId, request] of pending) if (request.socket === socket) pending.delete(requestId);
-    });
+    socket.on("close", () => { clients.delete(socket); });
   });
   return { httpServer, wsServer, port };
 }
 
-function safeSend(socket: WebSocket, message: unknown): void {
-  try { socket.send(typeof message === "string" ? message : JSON.stringify(message)); } catch { /* closed client */ }
-}
+function safeSend(socket: WebSocket, message: unknown): void { try { socket.send(typeof message === "string" ? message : JSON.stringify(message)); } catch { /* closed client */ } }
 function asRecord(value: unknown): Record<string, unknown> { if (!value || typeof value !== "object") throw new Error("params must be an object"); return value as Record<string, unknown>; }
 function requiredString(value: unknown, name: string): string { if (typeof value !== "string" || !value.trim()) throw new Error(`${name} must be a non-empty string`); return value; }
 function asApprovalResponse(value: unknown): ApprovalResponse { const record = asRecord(value); const requestId = requiredString(record.requestId, "requestId"); const decision = record.decision; if (decision !== "allow_once" && decision !== "allow_session" && decision !== "deny") throw new Error("Invalid approval decision"); return { requestId, decision }; }
