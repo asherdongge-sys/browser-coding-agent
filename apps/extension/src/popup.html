@@ -1,35 +1,29 @@
 <!doctype html>
 <html lang="zh-CN">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Browser Coding Agent</title>
   <style>
-    body { width: 360px; margin: 0; padding: 20px; font: 14px system-ui, sans-serif; background: #f7f7f8; color: #202124; }
-    h1 { font-size: 18px; margin: 0 0 16px; }
-    .card { background: white; border: 1px solid #ddd; border-radius: 12px; padding: 14px; }
-    .muted { color: #666; font-size: 12px; }
-    .command { margin: 12px 0; padding: 10px; border-radius: 8px; background: #1f2328; color: #fff; font-family: ui-monospace, monospace; white-space: pre-wrap; word-break: break-word; }
-    .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 14px; }
-    button { border: 0; border-radius: 8px; padding: 10px; cursor: pointer; font-weight: 600; }
-    #deny { background: #eee; } #allow { background: #111; color: white; }
-    #session { grid-column: 1 / -1; }
-    .hidden { display: none; }
+    body { width: 380px; margin: 0; padding: 18px; font: 14px system-ui, sans-serif; background:#f7f7f8; color:#202124; box-sizing:border-box; }
+    * { box-sizing:border-box; } h1 { font-size:18px; margin:0 0 6px; } .muted { color:#6b7280; font-size:12px; }
+    .card { background:#fff; border:1px solid #ddd; border-radius:12px; padding:14px; margin-top:12px; }
+    textarea { width:100%; min-height:82px; resize:vertical; border:1px solid #d1d5db; border-radius:8px; padding:10px; font:inherit; }
+    button { border:0; border-radius:8px; padding:10px 12px; cursor:pointer; font-weight:600; } #run { background:#111; color:#fff; width:100%; margin-top:8px; }
+    button:disabled { opacity:.5; cursor:not-allowed; } .event { padding:7px 0; border-bottom:1px solid #eee; font-size:12px; } .event:last-child{border-bottom:0}
+    .state { display:inline-block; padding:3px 7px; border-radius:999px; background:#eef2ff; font-size:11px; } .hidden { display:none; }
   </style>
 </head>
 <body>
   <h1>Browser Coding Agent</h1>
-  <div id="status" class="card">正在连接本地 Runtime…</div>
-  <div id="approval" class="card hidden">
-    <div class="muted">需要你的授权</div>
-    <p id="description"></p>
-    <div id="command" class="command"></div>
-    <div class="muted">风险等级：<span id="risk"></span></div>
-    <div class="actions">
-      <button id="deny">拒绝</button>
-      <button id="allow">允许一次</button>
-      <button id="session">本会话始终允许</button>
-    </div>
+  <div class="muted" id="connection">正在连接本地 Runtime…</div>
+  <div class="card">
+    <div class="muted">告诉 Agent 你要做什么</div>
+    <textarea id="goal" placeholder="例如：创建 hello.ts，然后运行它"></textarea>
+    <button id="run">开始开发</button>
+  </div>
+  <div class="card">
+    <div class="muted">Agent 活动</div>
+    <div id="events"><div class="event">等待任务…</div></div>
   </div>
   <script type="module" src="popup.js"></script>
 </body>
