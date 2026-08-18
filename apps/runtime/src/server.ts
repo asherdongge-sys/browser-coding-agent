@@ -6,7 +6,7 @@ import { PermissionManager } from "@browser-coding-agent/permissions";
 import { ToolRegistry, WorkspaceManager, createFilesystemTools, createTerminalTools } from "@browser-coding-agent/tools";
 
 export const DEFAULT_PORT = 4317;
-type PendingApproval = { socket?: WebSocket; id?: string | number; call: ToolCall; toolName: string; resolve: (result: ToolResult) => void };
+type PendingApproval = { socket: WebSocket | undefined; id: string | number | undefined; call: ToolCall; toolName: string; resolve: (result: ToolResult) => void };
 
 export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGENT_PORT ?? DEFAULT_PORT)) {
   const workspace = new WorkspaceManager();
@@ -37,7 +37,7 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
       });
     }
     if (decision !== "allow") return Promise.resolve({ ok: false, error: `Permission ${decision} for ${tool.descriptor.name}` });
-    return tool.execute(call.arguments);
+    return tool.execute(call.arguments).then((result) => result as ToolResult);
   };
 
   const planner = async (goal: string): Promise<readonly ToolCall[]> => {
@@ -70,7 +70,7 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
           if (response.decision === "allow_session") sessionAllowed.add(request.toolName);
           const tool = tools.get(request.toolName);
           if (!tool) request.resolve({ ok: false, error: "Tool no longer available" });
-          else { try { request.resolve(await tool.execute(request.call.arguments)); } catch (error) { request.resolve({ ok: false, error: error instanceof Error ? error.message : String(error) }); } }
+          else { try { request.resolve(await tool.execute(request.call.arguments) as ToolResult); } catch (error) { request.resolve({ ok: false, error: error instanceof Error ? error.message : String(error) }); } }
         }
         reply(socket, message.id, { ok: true });
         return;
