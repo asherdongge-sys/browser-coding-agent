@@ -4,6 +4,7 @@ const APPROVAL_URL = "approval.html";
 type ApprovalRequest = { requestId: string; tool: string; risk: "read" | "write" | "execute" | "git"; description: string; arguments: unknown };
 let socket: WebSocket | undefined;
 let currentApproval: ApprovalRequest | undefined;
+const pendingRpc = new Map<string, (response: unknown) => void>();
 
 const log = (...args: unknown[]) => console.log("[BrowserCodingAgent]", ...args);
 function broadcast(message: unknown): void { chrome.runtime.sendMessage(message).catch(() => undefined); }
@@ -27,21 +28,37 @@ function connectRuntime(): WebSocket {
   ws.addEventListener("message", (event) => {
     let message: unknown; try { message = JSON.parse(String(event.data)); } catch (error) { log("invalid runtime message", error); return; }
     if (!message || typeof message !== "object") return;
-    const data = message as { method?: string; params?: Partial<ApprovalRequest> };
-    log("runtime message", data.method ?? "response");
+    const data = message as { method?: string; params?: Partial<ApprovalRequest>; id?: string | number; result?: unknown; error?: unknown };
+    if (data.id !== undefined && !data.method) {
+      const resolve = pendingRpc.get(String(data.id));
+      if (resolve) { pendingRpc.delete(String(data.id)); resolve(data); }
+      return;
+    }
+    log("runtime message", data.method ?? "notification");
     if (data.method === "approval.request" && data.params?.requestId && data.params.tool && data.params.risk && data.params.description) {
       currentApproval = { requestId: data.params.requestId, tool: data.params.tool, risk: data.params.risk, description: data.params.description, arguments: data.params.arguments };
       log("approval request", currentApproval); broadcast({ type: "approval.request", request: currentApproval }); void openApprovalWindow(); return;
     }
     if (data.method === "agent.event") broadcast({ type: "agent.event", params: data.params });
   });
-  ws.addEventListener("close", () => { if (socket === ws) socket = undefined; log("runtime disconnected"); });
+  ws.addEventListener("close", () => {
+    if (socket === ws) socket = undefined;
+    for (const resolve of pendingRpc.values()) resolve({ ok: false, error: "Runtime WebSocket disconnected" });
+    pendingRpc.clear();
+    log("runtime disconnected");
+  });
   ws.addEventListener("error", (event) => log("runtime socket error", event));
   return ws;
 }
 function sendToRuntime(message: Record<string, unknown>, sendResponse: (response: unknown) => void): void {
   const ws = connectRuntime();
-  const send = () => { if (ws.readyState !== WebSocket.OPEN) { sendResponse({ ok: false, error: "Runtime WebSocket is not open" }); return; } ws.send(JSON.stringify(message)); sendResponse({ ok: true }); };
+  const id = typeof message.id === "string" || typeof message.id === "number" ? String(message.id) : crypto.randomUUID();
+  message.id = id;
+  const send = () => {
+    if (ws.readyState !== WebSocket.OPEN) { sendResponse({ ok: false, error: "Runtime WebSocket is not open" }); return; }
+    pendingRpc.set(id, sendResponse);
+    ws.send(JSON.stringify(message));
+  };
   if (ws.readyState === WebSocket.OPEN) send(); else ws.addEventListener("open", send, { once: true });
 }
 chrome.runtime.onInstalled.addListener(() => { log("service worker installed"); connectRuntime(); });
