@@ -14,17 +14,6 @@ async function openApprovalWindow(): Promise<void> {
   if (existing[0]?.id !== undefined) { await chrome.tabs.update(existing[0].id, { active: true }); return; }
   await chrome.windows.create({ url, type: "popup", width: 440, height: 620 });
 }
-async function notifyApproval(): Promise<void> {
-  try {
-    await chrome.notifications.create(`approval-${currentApproval?.requestId}`, {
-      type: "basic",
-      iconUrl: chrome.runtime.getURL("icon.svg"),
-      title: "Browser Coding Agent",
-      message: `需要授权：${currentApproval?.tool ?? "tool"}`,
-      priority: 2,
-    });
-  } catch (error) { log("notification failed", error); }
-}
 function connectRuntime(): WebSocket {
   if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return socket;
   const ws = new WebSocket(RUNTIME_URL);
@@ -44,7 +33,6 @@ function connectRuntime(): WebSocket {
     currentApproval = { requestId: data.params.requestId, tool: data.params.tool, risk: data.params.risk, description: data.params.description, arguments: data.params.arguments };
     log("approval request", currentApproval);
     broadcast({ type: "approval.request", request: currentApproval });
-    void notifyApproval();
     void openApprovalWindow();
   });
   ws.addEventListener("close", () => { if (socket === ws) socket = undefined; log("runtime disconnected"); });
@@ -62,7 +50,6 @@ function sendToRuntime(message: Record<string, unknown>, sendResponse: (response
 chrome.runtime.onInstalled.addListener(() => { log("service worker installed"); connectRuntime(); });
 chrome.runtime.onStartup.addListener(() => { log("service worker startup"); connectRuntime(); });
 connectRuntime();
-chrome.notifications.onClicked.addListener((notificationId) => { if (notificationId.startsWith("approval-")) void openApprovalWindow(); });
 chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
   if (!message || typeof message !== "object") return false;
   const request = message as Record<string, unknown>;
