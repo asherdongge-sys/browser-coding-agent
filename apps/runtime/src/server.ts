@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
-import { AgentLoop, type AgentEvent } from "@browser-coding-agent/agent-core";
+import { AgentLoop, type AgentEvent, type AgentContext } from "@browser-coding-agent/agent-core";
 import type { ApprovalResponse, RpcMessage, ToolCall, ToolResult } from "@browser-coding-agent/protocol";
 import { PermissionManager } from "@browser-coding-agent/permissions";
 import { ToolRegistry, WorkspaceManager, createFilesystemTools, createTerminalTools } from "@browser-coding-agent/tools";
@@ -32,13 +32,7 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
     if (decision === "ask") {
       return new Promise<ToolResult<TResult>>((resolve) => {
         const approvalId = crypto.randomUUID();
-        pending.set(approvalId, {
-          socket: requester,
-          id: requestId,
-          call,
-          toolName: tool.descriptor.name,
-          resolve: (result) => resolve(result as ToolResult<TResult>),
-        });
+        pending.set(approvalId, { socket: requester, id: requestId, call, toolName: tool.descriptor.name, resolve: (result) => resolve(result as ToolResult<TResult>) });
         broadcast({ jsonrpc: "2.0", method: "approval.request", params: { requestId: approvalId, tool: tool.descriptor.name, risk: tool.descriptor.risk, description: tool.descriptor.description, arguments: call.arguments } });
       });
     }
@@ -46,18 +40,31 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
     return tool.execute(call.arguments).then((result) => result as ToolResult<TResult>);
   };
 
-  const planner = async (goal: string): Promise<readonly ToolCall[]> => {
-    const normalized = goal.toLowerCase();
+  const planner = async (context: AgentContext): Promise<readonly ToolCall[]> => {
+    const normalized = context.goal.toLowerCase();
+    const last = context.history.at(-1);
+    if (last?.result?.ok === false) {
+      const error = last.result.error ?? "";
+      if (last.call.tool === "terminal.exec" && error.includes("ERR_UNKNOWN_FILE_EXTENSION")) {
+        return [
+          { tool: "fs.write", arguments: { path: "hello.js", content: 'console.log("Hello from Browser Coding Agent");\n' } },
+          { tool: "terminal.exec", arguments: { command: "node hello.js" } },
+        ];
+      }
+      return [];
+    }
     if (normalized.includes("hello") && (normalized.includes("创建") || normalized.includes("create"))) {
+      if (context.history.some((step) => step.call.tool === "terminal.exec" && step.result?.ok)) return [];
       return [
         { tool: "fs.write", arguments: { path: "hello.ts", content: 'console.log("Hello from Browser Coding Agent");\n' } },
         { tool: "terminal.exec", arguments: { command: "node hello.ts" } },
       ];
     }
-    return [
+    if (!context.history.length) return [
       { tool: "fs.list", arguments: { path: "." } },
       { tool: "fs.read", arguments: { path: "package.json" } },
     ];
+    return [];
   };
 
   wsServer.on("connection", (socket) => {
@@ -91,11 +98,12 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
         if (message.method === "tool.call") { const params = asRecord(message.params); const call = params.call as ToolCall | undefined; if (!call || typeof call.tool !== "string") throw new Error("call.tool is required"); reply(socket, id, await executeTool(call, socket, id)); return; }
         if (message.method === "agent.run") {
           const params = asRecord(message.params); const goal = requiredString(params.goal, "goal");
+          if (safeWorkspaceRoot(workspace) === null) { reply(socket, id, undefined, { code: -32001, message: "No workspace selected" }); return; }
           void (async () => {
             try {
-              const loop = new AgentLoop({ callTool: (call) => executeTool(call) }, async () => planner(goal));
-              await loop.run({ goal }, emitAgentEvent);
-              reply(socket, id, { ok: true, state: loop.getState() });
+              const loop = new AgentLoop({ callTool: (call) => executeTool(call) }, planner);
+              await loop.run({ goal, history: [] }, emitAgentEvent);
+              reply(socket, id, { ok: loop.getState() === "completed", state: loop.getState() });
             } catch (error) { reply(socket, id, undefined, { code: -32000, message: error instanceof Error ? error.message : String(error) }); }
           })();
           return;
