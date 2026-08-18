@@ -6,24 +6,28 @@ import { ToolRegistry, WorkspaceManager, createFilesystemTools, createTerminalTo
 
 export const DEFAULT_PORT = 4317;
 
+type PendingApproval = { socket: WebSocket; id: string | number; call: ToolCall; toolName: string };
+
 export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGENT_PORT ?? DEFAULT_PORT)) {
   const workspace = new WorkspaceManager();
   const tools = new ToolRegistry();
   const permissions = new PermissionManager({ defaultDecision: "deny", rules: { read: "allow", write: "ask", execute: "ask", git: "ask" } });
-  const pending = new Map<string, { socket: WebSocket; id: string | number; call: ToolCall; toolName: string }>();
+  const pending = new Map<string, PendingApproval>();
+  const clients = new Set<WebSocket>();
   const sessionAllowed = new Set<string>();
   for (const tool of [...createFilesystemTools(workspace), ...createTerminalTools(workspace)]) tools.register(tool);
 
   const httpServer = createServer((_request, response) => {
     response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({ name: "browser-coding-agent", protocol: "0.1", workspace: safeWorkspaceRoot(workspace) }));
+    response.end(JSON.stringify({ name: "browser-coding-agent", protocol: "0.1", workspace: safeWorkspaceRoot(workspace), clients: clients.size }));
   });
   const wsServer = new WebSocketServer({ server: httpServer });
 
   wsServer.on("connection", (socket) => {
+    clients.add(socket);
     socket.on("message", async (raw: Buffer) => {
       let message: RpcMessage;
-      try { message = JSON.parse(raw.toString()) as RpcMessage; } catch { socket.send(JSON.stringify({ jsonrpc: "2.0", id: "invalid", error: { code: -32700, message: "Invalid JSON" } })); return; }
+      try { message = JSON.parse(raw.toString()) as RpcMessage; } catch { safeSend(socket, { jsonrpc: "2.0", id: "invalid", error: { code: -32700, message: "Invalid JSON" } }); return; }
 
       if ("method" in message && message.method === "approval.respond" && "id" in message) {
         const response = asApprovalResponse(message.params); const request = pending.get(response.requestId);
@@ -51,7 +55,9 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
           const decision = sessionAllowed.has(tool.descriptor.name) ? "allow" : permissions.decide({ tool: tool.descriptor.name, risk: tool.descriptor.risk, description: tool.descriptor.description });
           if (decision === "ask") {
             const requestId = crypto.randomUUID(); pending.set(requestId, { socket, id, call, toolName: tool.descriptor.name });
-            socket.send(JSON.stringify({ jsonrpc: "2.0", method: "approval.request", params: { requestId, tool: tool.descriptor.name, risk: tool.descriptor.risk, description: tool.descriptor.description, arguments: call.arguments } })); return;
+            const approval = { jsonrpc: "2.0", method: "approval.request", params: { requestId, tool: tool.descriptor.name, risk: tool.descriptor.risk, description: tool.descriptor.description, arguments: call.arguments } };
+            broadcast(approval);
+            return;
           }
           if (decision !== "allow") { reply(socket, id, { ok: false, error: `Permission ${decision} for ${tool.descriptor.name}` }); return; }
           reply(socket, id, await tool.execute(call.arguments)); return;
@@ -59,16 +65,24 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
         reply(socket, id, undefined, { code: -32601, message: `Method not found: ${message.method}` });
       } catch (error) { reply(socket, id, undefined, { code: -32000, message: error instanceof Error ? error.message : String(error) }); }
     });
-    socket.on("close", () => { for (const [requestId, request] of pending) if (request.socket === socket) pending.delete(requestId); });
+    socket.on("close", () => {
+      clients.delete(socket);
+      for (const [requestId, request] of pending) if (request.socket === socket) pending.delete(requestId);
+    });
   });
   return { httpServer, wsServer, port };
 }
 
+function broadcast(message: unknown): void {
+  const payload = JSON.stringify(message);
+  for (const client of clients) if (client.readyState === 1) safeSend(client, payload);
+}
+function safeSend(socket: WebSocket, message: unknown): void { if (socket.readyState === 1) socket.send(typeof message === "string" ? message : JSON.stringify(message)); }
 function asRecord(value: unknown): Record<string, unknown> { if (!value || typeof value !== "object") throw new Error("params must be an object"); return value as Record<string, unknown>; }
 function requiredString(value: unknown, name: string): string { if (typeof value !== "string" || !value.trim()) throw new Error(`${name} must be a non-empty string`); return value; }
 function asApprovalResponse(value: unknown): ApprovalResponse { const record = asRecord(value); const requestId = requiredString(record.requestId, "requestId"); const decision = record.decision; if (decision !== "allow_once" && decision !== "allow_session" && decision !== "deny") throw new Error("Invalid approval decision"); return { requestId, decision }; }
 function safeWorkspaceRoot(workspace: WorkspaceManager): string | null { try { return workspace.getRoot(); } catch { return null; } }
-function reply(socket: WebSocket, id: string | number, result?: unknown, error?: { code: number; message: string }): void { socket.send(JSON.stringify({ jsonrpc: "2.0", id, ...(error ? { error } : { result }) })); }
+function reply(socket: WebSocket, id: string | number, result?: unknown, error?: { code: number; message: string }): void { safeSend(socket, { jsonrpc: "2.0", id, ...(error ? { error } : { result }) }); }
 
 const runtime = createRuntimeServer();
 runtime.httpServer.listen(runtime.port, "127.0.0.1", () => console.log(`Browser Coding Agent runtime listening on 127.0.0.1:${runtime.port}`));
