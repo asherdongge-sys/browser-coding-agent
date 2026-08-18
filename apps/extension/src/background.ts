@@ -16,14 +16,13 @@ async function openApprovalWindow(): Promise<void> {
 }
 async function notifyApproval(): Promise<void> {
   try {
-    const options: chrome.notifications.NotificationOptions = {
+    await chrome.notifications.create(`approval-${currentApproval?.requestId}`, {
       type: "basic",
       iconUrl: chrome.runtime.getURL("icon.svg"),
       title: "Browser Coding Agent",
       message: `需要授权：${currentApproval?.tool ?? "tool"}`,
       priority: 2,
-    };
-    await chrome.notifications.create(`approval-${currentApproval?.requestId}`, options);
+    });
   } catch (error) { log("notification failed", error); }
 }
 function connectRuntime(): WebSocket {
@@ -32,7 +31,7 @@ function connectRuntime(): WebSocket {
   socket = ws;
   log("connecting runtime", RUNTIME_URL);
   ws.addEventListener("open", () => {
-    if (socket !== ws) return;
+    if (socket !== ws || ws.readyState !== WebSocket.OPEN) return;
     log("runtime connected");
     ws.send(JSON.stringify({ jsonrpc: "2.0", id: crypto.randomUUID(), method: "runtime.ping" }));
   });
