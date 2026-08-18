@@ -125,6 +125,22 @@ try {
   chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
     if (!message || typeof message !== "object") return false; const request = message as Record<string, unknown>;
     if (request.type === "chatgpt.ping") { sendResponse({ ok: true }); return false; }
+    if (request.type === "chatgpt.bridge.diagnostic") {
+      const composer = getComposer(); const assistants = assistantMessages(); const button = findSendButton();
+      sendResponse({ ok: true, diagnostic: { composer: Boolean(composer), composerTag: composer?.tagName ?? null, sendButton: Boolean(button), assistantCount: assistants.length, latestAssistantTextLength: assistants.at(-1)?.text.length ?? 0, url: location.href } }); return false;
+    }
+    if (request.type === "chatgpt.bridge.test") {
+      void (async () => {
+        try {
+          const previous = assistantMessages().at(-1); emit({ type: "state.changed", state: "bridge-test" });
+          await submitToChatGPT("Please reply with exactly BROWSER_AGENT_BRIDGE_OK and nothing else.");
+          const text = await waitForAssistantResponse(previous?.node ?? null, previous?.text ?? "");
+          emit({ type: "state.changed", state: "bridge-test-passed" });
+          emit({ type: "tool.result", result: { ok: true, result: { text } } });
+        } catch (error) { emit({ type: "state.changed", state: "bridge-test-failed" }); emit({ type: "tool.result", result: { ok: false, error: error instanceof Error ? error.message : String(error) } }); }
+      })();
+      sendResponse({ ok: true }); return false;
+    }
     if (request.type !== "chatgpt.start") return false;
     const workspace = typeof request.workspace === "string" ? request.workspace : ""; const goal = typeof request.goal === "string" ? request.goal : "";
     if (!workspace || !goal) { sendResponse({ ok: false, error: "Workspace and goal are required" }); return false; }
