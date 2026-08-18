@@ -73,13 +73,21 @@ async function ensureChatGptBridge(tabId: number): Promise<void> {
   try {
     const response = await chrome.tabs.sendMessage(tabId, { type: "chatgpt.ping" });
     if (response?.ok) return;
-  } catch {
-    // Inject into an already-open ChatGPT tab when the declarative content script is absent.
-  }
+  } catch { /* inject below */ }
   await chrome.scripting.executeScript({ target: { tabId }, files: ["chatgpt-bridge.js"] });
   await new Promise((resolve) => setTimeout(resolve, 150));
   const response = await chrome.tabs.sendMessage(tabId, { type: "chatgpt.ping" });
   if (!response?.ok) throw new Error("ChatGPT Bridge did not start");
+}
+
+async function getActiveChatGptTab(): Promise<number> {
+  const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  const tab = tabs[0];
+  if (!tab?.id) throw new Error("No active tab");
+  const url = tab.url ?? "";
+  if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(url)) throw new Error("Open a ChatGPT tab first");
+  await ensureChatGptBridge(tab.id);
+  return tab.id;
 }
 
 chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
@@ -90,26 +98,24 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
     const workspace = typeof request.workspace === "string" ? request.workspace : "";
     const goal = typeof request.goal === "string" ? request.goal : "";
     if (!workspace || !goal) { sendResponse({ ok: false, error: "Workspace and goal are required" }); return false; }
-    void chrome.tabs.query({ active: true, lastFocusedWindow: true }).then(async (tabs) => {
-      const tab = tabs[0];
-      if (!tab?.id) { sendResponse({ ok: false, error: "No active tab" }); return; }
-      const url = tab.url ?? "";
-      if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(url)) { sendResponse({ ok: false, error: "Open a ChatGPT tab first" }); return; }
-      try {
-        await ensureChatGptBridge(tab.id);
-        chrome.tabs.sendMessage(tab.id, { type: "chatgpt.start", workspace, goal }, () => { void chrome.runtime.lastError; });
-        sendResponse({ ok: true });
-      } catch (error) {
-        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
-      }
-    });
+    void getActiveChatGptTab().then((tabId) => {
+      chrome.tabs.sendMessage(tabId, { type: "chatgpt.start", workspace, goal }, () => { void chrome.runtime.lastError; });
+      sendResponse({ ok: true });
+    }).catch((error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }));
     return true;
   }
 
-  if (request.type === "agent.event") {
-    broadcast({ type: "agent.event", params: request.params });
-    return false;
+  if (request.type === "chatgpt.bridge.diagnostic" || request.type === "chatgpt.bridge.test") {
+    void getActiveChatGptTab().then((tabId) => {
+      chrome.tabs.sendMessage(tabId, request, (response) => {
+        if (chrome.runtime.lastError) { sendResponse({ ok: false, error: chrome.runtime.lastError.message }); return; }
+        sendResponse(response ?? { ok: false, error: "Bridge returned no response" });
+      });
+    }).catch((error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+    return true;
   }
+
+  if (request.type === "agent.event") { broadcast({ type: "agent.event", params: request.params }); return false; }
   if (request.type === "approval.current") { sendResponse({ request: currentApproval }); return false; }
   if (request.type === "approval.respond") {
     const requestId = typeof request.requestId === "string" ? request.requestId : "";
