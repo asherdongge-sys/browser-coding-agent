@@ -15,14 +15,19 @@ async function openApprovalWindow(): Promise<void> {
   await chrome.windows.create({ url, type: "popup", width: 440, height: 620 });
 }
 async function notifyApproval(): Promise<void> {
-  try { await chrome.notifications.create(`approval-${currentApproval?.requestId}`, { type: "basic", iconUrl: chrome.runtime.getURL("icon.png"), title: "Browser Coding Agent", message: `需要授权：${currentApproval?.tool ?? "tool"}`, priority: 2 }); } catch (error) { log("notification failed", error); }
+  try { await chrome.notifications.create(`approval-${currentApproval?.requestId}`, { type: "basic", title: "Browser Coding Agent", message: `需要授权：${currentApproval?.tool ?? "tool"}`, priority: 2 }); } catch (error) { log("notification failed", error); }
 }
 function connectRuntime(): WebSocket {
-  if (socket?.readyState === WebSocket.OPEN) return socket;
+  if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return socket;
+  const ws = new WebSocket(RUNTIME_URL);
+  socket = ws;
   log("connecting runtime", RUNTIME_URL);
-  socket = new WebSocket(RUNTIME_URL);
-  socket.addEventListener("open", () => { log("runtime connected"); socket?.send(JSON.stringify({ jsonrpc: "2.0", id: crypto.randomUUID(), method: "runtime.ping" })); });
-  socket.addEventListener("message", (event) => {
+  ws.addEventListener("open", () => {
+    if (socket !== ws) return;
+    log("runtime connected");
+    ws.send(JSON.stringify({ jsonrpc: "2.0", id: crypto.randomUUID(), method: "runtime.ping" }));
+  });
+  ws.addEventListener("message", (event) => {
     let message: unknown; try { message = JSON.parse(String(event.data)); } catch (error) { log("invalid runtime message", error); return; }
     if (!message || typeof message !== "object") return;
     const data = message as { method?: string; params?: Partial<ApprovalRequest> };
@@ -34,14 +39,17 @@ function connectRuntime(): WebSocket {
     void notifyApproval();
     void openApprovalWindow();
   });
-  socket.addEventListener("close", () => { log("runtime disconnected"); socket = undefined; });
-  socket.addEventListener("error", (event) => log("runtime socket error", event));
-  return socket;
+  ws.addEventListener("close", () => { if (socket === ws) socket = undefined; log("runtime disconnected"); });
+  ws.addEventListener("error", (event) => log("runtime socket error", event));
+  return ws;
 }
 function sendToRuntime(message: Record<string, unknown>, sendResponse: (response: unknown) => void): void {
-  const runtimeSocket = connectRuntime();
-  const send = () => { runtimeSocket.send(JSON.stringify(message)); sendResponse({ ok: true }); };
-  if (runtimeSocket.readyState === WebSocket.OPEN) send(); else runtimeSocket.addEventListener("open", send, { once: true });
+  const ws = connectRuntime();
+  const send = () => {
+    if (ws.readyState !== WebSocket.OPEN) { sendResponse({ ok: false, error: "Runtime WebSocket is not open" }); return; }
+    ws.send(JSON.stringify(message)); sendResponse({ ok: true });
+  };
+  if (ws.readyState === WebSocket.OPEN) send(); else ws.addEventListener("open", send, { once: true });
 }
 chrome.runtime.onInstalled.addListener(() => { log("service worker installed"); connectRuntime(); });
 chrome.runtime.onStartup.addListener(() => { log("service worker startup"); connectRuntime(); });
