@@ -71,13 +71,15 @@ function sendToRuntime(message: Record<string, unknown>, sendResponse: (response
 
 async function ensureChatGptBridge(tabId: number): Promise<void> {
   try {
-    await chrome.tabs.sendMessage(tabId, { type: "chatgpt.ping" });
-    return;
+    const response = await chrome.tabs.sendMessage(tabId, { type: "chatgpt.ping" });
+    if (response?.ok) return;
   } catch {
-    // The content script may not have been injected into an already-open tab.
+    // Inject into an already-open ChatGPT tab when the declarative content script is absent.
   }
   await chrome.scripting.executeScript({ target: { tabId }, files: ["chatgpt-bridge.js"] });
-  await new Promise((resolve) => setTimeout(resolve, 100));
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  const response = await chrome.tabs.sendMessage(tabId, { type: "chatgpt.ping" });
+  if (!response?.ok) throw new Error("ChatGPT Bridge did not start");
 }
 
 chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
@@ -95,8 +97,8 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
       if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(url)) { sendResponse({ ok: false, error: "Open a ChatGPT tab first" }); return; }
       try {
         await ensureChatGptBridge(tab.id);
-        const response = await chrome.tabs.sendMessage(tab.id, { type: "chatgpt.start", workspace, goal });
-        sendResponse(response ?? { ok: true });
+        chrome.tabs.sendMessage(tab.id, { type: "chatgpt.start", workspace, goal }, () => { void chrome.runtime.lastError; });
+        sendResponse({ ok: true });
       } catch (error) {
         sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
       }
@@ -104,6 +106,10 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
     return true;
   }
 
+  if (request.type === "agent.event") {
+    broadcast({ type: "agent.event", params: request.params });
+    return false;
+  }
   if (request.type === "approval.current") { sendResponse({ request: currentApproval }); return false; }
   if (request.type === "approval.respond") {
     const requestId = typeof request.requestId === "string" ? request.requestId : "";
