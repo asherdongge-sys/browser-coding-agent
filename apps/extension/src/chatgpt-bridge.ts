@@ -3,9 +3,12 @@ type ToolResult = { ok: boolean; result?: unknown; error?: string };
 type RuntimeResponse = { result?: unknown; error?: { message?: string } };
 type RuntimeToolDescription = { name: string; description?: string; inputSchema?: unknown };
 
+type AssistantMessage = { text: string; node: HTMLElement };
+
 const PANEL_ID = "bca-chatgpt-bridge";
 const WORKSPACE_KEY = "bca.workspace";
 const MAX_ROUNDS = 12;
+const RESPONSE_TIMEOUT_MS = 120000;
 let running = false;
 
 function runtimeRpc(message: Record<string, unknown>): Promise<RuntimeResponse> {
@@ -19,7 +22,9 @@ function runtimeRpc(message: Record<string, unknown>): Promise<RuntimeResponse> 
 }
 
 function getComposer(): HTMLTextAreaElement | HTMLElement | null {
-  return document.querySelector<HTMLTextAreaElement>("textarea:not(#bca-goal)") ?? document.querySelector<HTMLElement>("[contenteditable='true']");
+  return document.querySelector<HTMLTextAreaElement>("textarea:not(#bca-goal)") ??
+    document.querySelector<HTMLElement>("[contenteditable='true'][role='textbox']") ??
+    document.querySelector<HTMLElement>("[contenteditable='true']");
 }
 
 function setComposerValue(composer: HTMLTextAreaElement | HTMLElement, text: string): void {
@@ -38,23 +43,47 @@ async function submitToChatGPT(text: string): Promise<void> {
   const composer = getComposer();
   if (!composer) throw new Error("ChatGPT composer was not found. Open a normal ChatGPT conversation.");
   setComposerValue(composer, text);
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  composer.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true }));
-  await new Promise((resolve) => setTimeout(resolve, 250));
+  await new Promise((resolve) => setTimeout(resolve, 150));
+
+  if (composer instanceof HTMLTextAreaElement) {
+    composer.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true }));
+    composer.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", bubbles: true }));
+  } else {
+    composer.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true }));
+    composer.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", bubbles: true }));
+  }
+  await new Promise((resolve) => setTimeout(resolve, 300));
 }
 
-function assistantArticles(): HTMLElement[] {
-  return Array.from(document.querySelectorAll<HTMLElement>("article")).filter((node) => node.innerText.trim().length > 0);
+function assistantMessages(): AssistantMessage[] {
+  const roleNodes = Array.from(document.querySelectorAll<HTMLElement>("[data-message-author-role='assistant']"));
+  if (roleNodes.length > 0) {
+    return roleNodes.map((node) => ({ text: node.innerText.trim(), node })).filter((item) => item.text.length > 0);
+  }
+
+  const articles = Array.from(document.querySelectorAll<HTMLElement>("article"))
+    .filter((node) => node.innerText.trim().length > 0);
+  return articles.map((node) => ({ text: node.innerText.trim(), node }));
+}
+
+function assistantMessageCount(): number {
+  return assistantMessages().length;
 }
 
 async function waitForAssistantResponse(previousCount: number): Promise<string> {
-  const started = Date.now(); let stableText = ""; let stableSince = 0;
-  while (Date.now() - started < 120000) {
-    const articles = assistantArticles();
-    if (articles.length > previousCount) {
-      const text = articles.at(-1)?.innerText.trim() ?? "";
-      if (text && text !== stableText) { stableText = text; stableSince = Date.now(); }
-      if (stableText && Date.now() - stableSince > 900) return stableText;
+  const started = Date.now();
+  let lastText = "";
+  let stableSince = 0;
+
+  while (Date.now() - started < RESPONSE_TIMEOUT_MS) {
+    const messages = assistantMessages();
+    if (messages.length > previousCount) {
+      const text = messages[messages.length - 1]?.text ?? "";
+      if (text && text !== lastText) {
+        lastText = text;
+        stableSince = Date.now();
+      }
+      if (lastText && Date.now() - stableSince >= 1200) return lastText;
     }
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
@@ -104,6 +133,7 @@ function resultSummaryPrompt(goal: string, history: Array<{ call: ToolCall; resu
     "Use the execution history below as the source of truth. Do not claim actions that are not confirmed by successful tool results.",
     "For a file-list or inspection request, explicitly show the useful files and important contents discovered.",
     "If something failed, explain the failure and what was or was not completed.",
+    "Do not return JSON. Return only the final answer for the user.",
     `Original goal: ${goal}`,
     `Execution history: ${JSON.stringify(history)}`,
   ].join("\n\n");
@@ -128,30 +158,37 @@ async function runAgent(goal: string, workspace: string, status: HTMLElement, ou
     const tools: RuntimeToolDescription[] = Array.isArray(toolsResponse.result) ? toolsResponse.result as RuntimeToolDescription[] : [];
     const history: Array<{ call: ToolCall; result: ToolResult }> = [];
     status.textContent = "已连接本地 Runtime，正在让 ChatGPT 规划…";
+
     for (let round = 0; round < MAX_ROUNDS; round += 1) {
-      const articlesBefore = assistantArticles().length;
+      const messagesBefore = assistantMessageCount();
       await submitToChatGPT(plannerPrompt(goal, tools, history));
-      const responseText = await waitForAssistantResponse(articlesBefore);
+      const responseText = await waitForAssistantResponse(messagesBefore);
       const plan = parseToolPlan(responseText);
+
       if (plan.done) {
         status.textContent = "正在生成最终结果…";
-        const finalArticlesBefore = assistantArticles().length;
+        const finalMessagesBefore = assistantMessageCount();
         await submitToChatGPT(resultSummaryPrompt(goal, history));
-        const finalText = await waitForAssistantResponse(finalArticlesBefore);
+        const finalText = await waitForAssistantResponse(finalMessagesBefore);
         renderFinalResult(output, finalText);
         status.textContent = "Agent 已完成";
         return;
       }
+
       for (const call of plan.calls) {
         status.textContent = `执行 ${call.tool}…`;
         const response = await runtimeRpc({ jsonrpc: "2.0", id: crypto.randomUUID(), method: "tool.call", params: { call } });
-        const result = response.error ? { ok: false, error: response.error.message ?? "Runtime tool call failed" } : response.result as ToolResult;
+        const result = response.error
+          ? { ok: false, error: response.error.message ?? "Runtime tool call failed" }
+          : response.result as ToolResult;
         history.push({ call, result });
         status.textContent = result.ok ? `完成 ${call.tool}，返回 ChatGPT 分析…` : `${call.tool} 失败，返回 ChatGPT 修复…`;
       }
     }
     throw new Error(`Agent stopped after ${MAX_ROUNDS} planning rounds`);
-  } finally { running = false; }
+  } finally {
+    running = false;
+  }
 }
 
 function mountPanel(): void {
@@ -168,10 +205,14 @@ function mountPanel(): void {
   const output = panel.querySelector<HTMLPreElement>("#bca-output")!;
   chrome.storage.local.get(WORKSPACE_KEY, (value) => { if (typeof value[WORKSPACE_KEY] === "string") workspaceInput.value = value[WORKSPACE_KEY] as string; });
   button.addEventListener("click", () => {
-    const workspace = workspaceInput.value.trim(); const goal = goalInput.value.trim();
+    const workspace = workspaceInput.value.trim();
+    const goal = goalInput.value.trim();
     if (!workspace || !goal) { status.textContent = "请填写工作区和任务"; return; }
-    chrome.storage.local.set({ [WORKSPACE_KEY]: workspace }); button.disabled = true;
-    void runAgent(goal, workspace, status, output).catch((error: unknown) => { status.textContent = `Agent 失败：${error instanceof Error ? error.message : String(error)}`; }).finally(() => { button.disabled = false; });
+    chrome.storage.local.set({ [WORKSPACE_KEY]: workspace });
+    button.disabled = true;
+    void runAgent(goal, workspace, status, output)
+      .catch((error: unknown) => { status.textContent = `Agent 失败：${error instanceof Error ? error.message : String(error)}`; })
+      .finally(() => { button.disabled = false; });
   });
 }
 
