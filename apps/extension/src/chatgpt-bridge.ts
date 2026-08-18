@@ -2,6 +2,8 @@ type ToolCall = { tool: string; arguments: Record<string, unknown> };
 type ToolResult = { ok: boolean; result?: unknown; error?: string };
 type RuntimeResponse = { result?: unknown; error?: { message?: string } };
 
+type RuntimeToolDescription = { name: string; description?: string; inputSchema?: unknown };
+
 const PANEL_ID = "bca-chatgpt-bridge";
 const WORKSPACE_KEY = "bca.workspace";
 const MAX_ROUNDS = 12;
@@ -19,8 +21,7 @@ function runtimeRpc(message: Record<string, unknown>): Promise<RuntimeResponse> 
 
 function getComposer(): HTMLTextAreaElement | HTMLElement | null {
   return document.querySelector<HTMLTextAreaElement>("textarea:not(#bca-goal)")
-    ?? Array.from(document.querySelectorAll<HTMLElement>("[contenteditable='true']")).find((node) => !node.closest(`#${PANEL_ID}`))
-    ?? null;
+    ?? document.querySelector<HTMLElement>("[contenteditable='true']");
 }
 
 function setComposerValue(composer: HTMLTextAreaElement | HTMLElement, text: string): void {
@@ -39,9 +40,9 @@ async function submitToChatGPT(text: string): Promise<void> {
   const composer = getComposer();
   if (!composer) throw new Error("ChatGPT composer was not found. Open a normal ChatGPT conversation.");
   setComposerValue(composer, text);
-  await new Promise((resolve) => setTimeout(resolve, 150));
+  await new Promise((resolve) => setTimeout(resolve, 100));
   composer.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true }));
-  await new Promise((resolve) => setTimeout(resolve, 300));
+  await new Promise((resolve) => setTimeout(resolve, 250));
 }
 
 function assistantArticles(): HTMLElement[] {
@@ -49,15 +50,13 @@ function assistantArticles(): HTMLElement[] {
 }
 
 async function waitForAssistantResponse(previousCount: number): Promise<string> {
-  const started = Date.now();
-  let stableText = "";
-  let stableSince = 0;
+  const started = Date.now(); let stableText = ""; let stableSince = 0;
   while (Date.now() - started < 120000) {
     const articles = assistantArticles();
     if (articles.length > previousCount) {
       const text = articles.at(-1)?.innerText.trim() ?? "";
       if (text && text !== stableText) { stableText = text; stableSince = Date.now(); }
-      if (stableText && Date.now() - stableSince > 1200) return stableText;
+      if (stableText && Date.now() - stableSince > 900) return stableText;
     }
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
@@ -87,7 +86,7 @@ function parseToolPlan(text: string): { calls: ToolCall[]; done: boolean } {
   throw new Error("ChatGPT did not return the required JSON tool plan");
 }
 
-function plannerPrompt(goal: string, tools: unknown[], history: unknown[]): string {
+function plannerPrompt(goal: string, tools: RuntimeToolDescription[], history: Array<{ call: ToolCall; result: ToolResult }>): string {
   return [
     "You are the brain of Browser Coding Agent. You are operating inside the user's logged-in ChatGPT browser session.",
     "The local computer is controlled only through the tools listed below. Never claim a local change was made unless a tool result confirms it.",
@@ -108,7 +107,7 @@ async function runAgent(goal: string, workspace: string, status: HTMLElement): P
     if (selected.error) throw new Error(selected.error.message ?? "Workspace selection failed");
     const toolsResponse = await runtimeRpc({ jsonrpc: "2.0", id: crypto.randomUUID(), method: "tools.list" });
     if (toolsResponse.error) throw new Error(toolsResponse.error.message ?? "Unable to list tools");
-    const tools = toolsResponse.result ?? [];
+    const tools: RuntimeToolDescription[] = Array.isArray(toolsResponse.result) ? toolsResponse.result as RuntimeToolDescription[] : [];
     const history: Array<{ call: ToolCall; result: ToolResult }> = [];
     status.textContent = "已连接本地 Runtime，正在让 ChatGPT 规划…";
     for (let round = 0; round < MAX_ROUNDS; round += 1) {
