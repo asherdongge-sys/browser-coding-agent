@@ -81,7 +81,7 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
 }
 
 function safeSend(socket: WebSocket, message: unknown): void {
-  if (socket.readyState === 1) socket.send(typeof message === "string" ? message : JSON.stringify(message));
+  try { socket.send(typeof message === "string" ? message : JSON.stringify(message)); } catch { /* closed client */ }
 }
 function asRecord(value: unknown): Record<string, unknown> { if (!value || typeof value !== "object") throw new Error("params must be an object"); return value as Record<string, unknown>; }
 function requiredString(value: unknown, name: string): string { if (typeof value !== "string" || !value.trim()) throw new Error(`${name} must be a non-empty string`); return value; }
