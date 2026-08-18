@@ -33,3 +33,5 @@ function startAgent(): void {
 run.addEventListener("click", startAgent);
 goal.addEventListener("keydown", (event) => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter") startAgent(); });
 connectEvents();
+
+export {};
