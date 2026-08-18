@@ -163,6 +163,10 @@ try {
   chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
     if (!message || typeof message !== "object") return false;
     const request = message as Record<string, unknown>;
+    if (request.type === "chatgpt.ping") {
+      sendResponse({ ok: true });
+      return false;
+    }
     if (request.type !== "chatgpt.start") return false;
     const workspace = typeof request.workspace === "string" ? request.workspace : "";
     const goal = typeof request.goal === "string" ? request.goal : "";
