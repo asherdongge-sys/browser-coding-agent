@@ -15,5 +15,8 @@
     "@browser-coding-agent/protocol": "workspace:*",
     "@browser-coding-agent/tools": "workspace:*",
     "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.1"
   }
 }
