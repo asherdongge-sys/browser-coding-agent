@@ -4,25 +4,26 @@ type RuntimeResponse = { result?: unknown; error?: { message?: string } };
 type RuntimeToolDescription = { name: string; description?: string; inputSchema?: unknown };
 
 type AssistantMessage = { text: string; node: HTMLElement };
-
-const PANEL_ID = "bca-chatgpt-bridge";
-const WORKSPACE_KEY = "bca.workspace";
 const MAX_ROUNDS = 12;
 const RESPONSE_TIMEOUT_MS = 120000;
 let running = false;
 
 function runtimeRpc(message: Record<string, unknown>): Promise<RuntimeResponse> {
   return new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage(message, (response: RuntimeResponse | undefined) => {
-      if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; }
-      if (!response) { reject(new Error("Extension returned no response")); return; }
-      resolve(response);
-    });
+    try {
+      chrome.runtime.sendMessage(message, (response: RuntimeResponse | undefined) => {
+        if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; }
+        if (!response) { reject(new Error("Extension returned no response")); return; }
+        resolve(response);
+      });
+    } catch (error) {
+      reject(error instanceof Error ? error : new Error(String(error)));
+    }
   });
 }
 
 function getComposer(): HTMLTextAreaElement | HTMLElement | null {
-  return document.querySelector<HTMLTextAreaElement>("textarea:not(#bca-goal)") ??
+  return document.querySelector<HTMLTextAreaElement>("textarea") ??
     document.querySelector<HTMLElement>("[contenteditable='true'][role='textbox']") ??
     document.querySelector<HTMLElement>("[contenteditable='true']");
 }
@@ -31,7 +32,8 @@ function setComposerValue(composer: HTMLTextAreaElement | HTMLElement, text: str
   composer.focus();
   if (composer instanceof HTMLTextAreaElement) {
     const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
-    setter?.call(composer, text);
+    if (!setter) throw new Error("Unable to set ChatGPT composer value");
+    setter.call(composer, text);
     composer.dispatchEvent(new Event("input", { bubbles: true }));
     return;
   }
@@ -43,47 +45,30 @@ async function submitToChatGPT(text: string): Promise<void> {
   const composer = getComposer();
   if (!composer) throw new Error("ChatGPT composer was not found. Open a normal ChatGPT conversation.");
   setComposerValue(composer, text);
-  await new Promise((resolve) => setTimeout(resolve, 150));
-
-  if (composer instanceof HTMLTextAreaElement) {
-    composer.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true }));
-    composer.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", bubbles: true }));
-  } else {
-    composer.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true }));
-    composer.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", bubbles: true }));
-  }
-  await new Promise((resolve) => setTimeout(resolve, 300));
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  composer.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true }));
+  composer.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", bubbles: true }));
+  await new Promise((resolve) => setTimeout(resolve, 500));
 }
 
 function assistantMessages(): AssistantMessage[] {
   const roleNodes = Array.from(document.querySelectorAll<HTMLElement>("[data-message-author-role='assistant']"));
-  if (roleNodes.length > 0) {
-    return roleNodes.map((node) => ({ text: node.innerText.trim(), node })).filter((item) => item.text.length > 0);
-  }
-
-  const articles = Array.from(document.querySelectorAll<HTMLElement>("article"))
-    .filter((node) => node.innerText.trim().length > 0);
-  return articles.map((node) => ({ text: node.innerText.trim(), node }));
-}
-
-function assistantMessageCount(): number {
-  return assistantMessages().length;
+  if (roleNodes.length > 0) return roleNodes.map((node) => ({ text: node.innerText.trim(), node })).filter((item) => item.text.length > 0);
+  return Array.from(document.querySelectorAll<HTMLElement>("article"))
+    .map((node) => ({ text: node.innerText.trim(), node }))
+    .filter((item) => item.text.length > 0);
 }
 
 async function waitForAssistantResponse(previousCount: number): Promise<string> {
   const started = Date.now();
   let lastText = "";
   let stableSince = 0;
-
   while (Date.now() - started < RESPONSE_TIMEOUT_MS) {
     const messages = assistantMessages();
     if (messages.length > previousCount) {
       const text = messages[messages.length - 1]?.text ?? "";
-      if (text && text !== lastText) {
-        lastText = text;
-        stableSince = Date.now();
-      }
-      if (lastText && Date.now() - stableSince >= 1200) return lastText;
+      if (text && text !== lastText) { lastText = text; stableSince = Date.now(); }
+      if (lastText && stableSince > 0 && Date.now() - stableSince >= 1200) return lastText;
     }
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
@@ -108,48 +93,39 @@ function parseToolPlan(text: string): { calls: ToolCall[]; done: boolean } {
         return { tool: call.tool, arguments: call.arguments as Record<string, unknown> };
       });
       return { calls, done: record.done === true || calls.length === 0 };
-    } catch { /* try next candidate */ }
+    } catch { /* continue with the next candidate */ }
   }
   throw new Error("ChatGPT did not return the required JSON tool plan");
 }
 
 function plannerPrompt(goal: string, tools: RuntimeToolDescription[], history: Array<{ call: ToolCall; result: ToolResult }>): string {
   return [
-    "You are the brain of Browser Coding Agent. You are operating inside the user's logged-in ChatGPT browser session.",
-    "The local computer is controlled only through the tools listed below. Never claim a local change was made unless a tool result confirms it.",
-    "Plan only the NEXT batch of tool calls. After receiving tool results, decide the next batch. If a command fails, diagnose it and repair it instead of repeating the same failed call.",
-    "Return JSON ONLY. No markdown, no explanation.",
-    'When work is complete, return {"done":true,"calls":[]}. Otherwise return {"done":false,"calls":[{"tool":"...","arguments":{}}]}.',
+    "You are the coding-agent planner operating in the user's logged-in ChatGPT browser session.",
+    "The local computer is available only through the listed tools. Never claim local state that a tool result does not confirm.",
+    "Plan only the NEXT batch of tool calls. If a previous call failed, diagnose the actual error and choose a repair instead of blindly repeating it.",
+    "Return JSON ONLY, with no markdown or explanation.",
+    'When the task is complete, return {"done":true,"calls":[]}. Otherwise return {"done":false,"calls":[{"tool":"...","arguments":{}}]}.',
     `Goal: ${goal}`,
     `Available tools: ${JSON.stringify(tools)}`,
     `Execution history: ${JSON.stringify(history)}`,
   ].join("\n\n");
 }
 
-function resultSummaryPrompt(goal: string, history: Array<{ call: ToolCall; result: ToolResult }>): string {
+function finalPrompt(goal: string, history: Array<{ call: ToolCall; result: ToolResult }>): string {
   return [
-    "The Browser Coding Agent has finished executing the requested local tools.",
-    "Now answer the user's original request in normal conversational language.",
-    "Use the execution history below as the source of truth. Do not claim actions that are not confirmed by successful tool results.",
-    "For a file-list or inspection request, explicitly show the useful files and important contents discovered.",
-    "If something failed, explain the failure and what was or was not completed.",
-    "Do not return JSON. Return only the final answer for the user.",
+    "The local Browser Coding Agent has finished executing tools for the user's request.",
+    "Answer the original user normally, using only the execution history as evidence.",
+    "Do not claim a file was changed, a command succeeded, or a test passed unless the tool result confirms it.",
+    "For inspection requests, summarize the useful files and findings. For failures, explain what failed.",
+    "Do not return JSON.",
     `Original goal: ${goal}`,
     `Execution history: ${JSON.stringify(history)}`,
   ].join("\n\n");
 }
 
-function renderFinalResult(output: HTMLElement, text: string): void {
-  output.hidden = false;
-  output.textContent = text;
-  output.scrollTop = output.scrollHeight;
-}
-
-async function runAgent(goal: string, workspace: string, status: HTMLElement, output: HTMLElement): Promise<void> {
+async function runAgent(workspace: string, goal: string): Promise<void> {
   if (running) return;
   running = true;
-  output.hidden = true;
-  output.textContent = "";
   try {
     const selected = await runtimeRpc({ jsonrpc: "2.0", id: crypto.randomUUID(), method: "workspace.select", params: { path: workspace } });
     if (selected.error) throw new Error(selected.error.message ?? "Workspace selection failed");
@@ -157,32 +133,24 @@ async function runAgent(goal: string, workspace: string, status: HTMLElement, ou
     if (toolsResponse.error) throw new Error(toolsResponse.error.message ?? "Unable to list tools");
     const tools: RuntimeToolDescription[] = Array.isArray(toolsResponse.result) ? toolsResponse.result as RuntimeToolDescription[] : [];
     const history: Array<{ call: ToolCall; result: ToolResult }> = [];
-    status.textContent = "已连接本地 Runtime，正在让 ChatGPT 规划…";
 
     for (let round = 0; round < MAX_ROUNDS; round += 1) {
-      const messagesBefore = assistantMessageCount();
+      const before = assistantMessages().length;
       await submitToChatGPT(plannerPrompt(goal, tools, history));
-      const responseText = await waitForAssistantResponse(messagesBefore);
+      const responseText = await waitForAssistantResponse(before);
       const plan = parseToolPlan(responseText);
-
       if (plan.done) {
-        status.textContent = "正在生成最终结果…";
-        const finalMessagesBefore = assistantMessageCount();
-        await submitToChatGPT(resultSummaryPrompt(goal, history));
-        const finalText = await waitForAssistantResponse(finalMessagesBefore);
-        renderFinalResult(output, finalText);
-        status.textContent = "Agent 已完成";
+        const finalBefore = assistantMessages().length;
+        await submitToChatGPT(finalPrompt(goal, history));
+        await waitForAssistantResponse(finalBefore);
         return;
       }
-
       for (const call of plan.calls) {
-        status.textContent = `执行 ${call.tool}…`;
         const response = await runtimeRpc({ jsonrpc: "2.0", id: crypto.randomUUID(), method: "tool.call", params: { call } });
-        const result = response.error
+        const result: ToolResult = response.error
           ? { ok: false, error: response.error.message ?? "Runtime tool call failed" }
           : response.result as ToolResult;
         history.push({ call, result });
-        status.textContent = result.ok ? `完成 ${call.tool}，返回 ChatGPT 分析…` : `${call.tool} 失败，返回 ChatGPT 修复…`;
       }
     }
     throw new Error(`Agent stopped after ${MAX_ROUNDS} planning rounds`);
@@ -191,35 +159,21 @@ async function runAgent(goal: string, workspace: string, status: HTMLElement, ou
   }
 }
 
-function mountPanel(): void {
-  if (document.getElementById(PANEL_ID)) return;
-  const panel = document.createElement("section");
-  panel.id = PANEL_ID;
-  panel.style.cssText = "position:fixed;right:16px;bottom:16px;z-index:2147483647;width:360px;padding:14px;border:1px solid #d1d5db;border-radius:12px;background:#fff;color:#111827;box-shadow:0 12px 40px rgba(0,0,0,.18);font:13px system-ui,sans-serif";
-  panel.innerHTML = `<strong>Browser Coding Agent</strong><div style="margin-top:8px"><input id="bca-workspace" placeholder="本地工作区，例如 E:\\web\\project" style="width:100%;box-sizing:border-box;padding:8px;border:1px solid #d1d5db;border-radius:8px"></div><div style="margin-top:8px"><textarea id="bca-goal" placeholder="告诉 ChatGPT 你要开发什么…" rows="4" style="width:100%;box-sizing:border-box;padding:8px;border:1px solid #d1d5db;border-radius:8px;resize:vertical"></textarea></div><button id="bca-start" style="margin-top:8px;width:100%;padding:8px;border:0;border-radius:8px;background:#111827;color:#fff;cursor:pointer">开始 Agent</button><div id="bca-status" style="margin-top:8px;color:#4b5563">等待任务…</div><pre id="bca-output" hidden style="margin-top:10px;max-height:240px;overflow:auto;white-space:pre-wrap;word-break:break-word;padding:10px;border-radius:8px;background:#f3f4f6"></pre>`;
-  document.body.append(panel);
-  const workspaceInput = panel.querySelector<HTMLInputElement>("#bca-workspace")!;
-  const goalInput = panel.querySelector<HTMLTextAreaElement>("#bca-goal")!;
-  const button = panel.querySelector<HTMLButtonElement>("#bca-start")!;
-  const status = panel.querySelector<HTMLDivElement>("#bca-status")!;
-  const output = panel.querySelector<HTMLPreElement>("#bca-output")!;
-  chrome.storage.local.get(WORKSPACE_KEY, (value) => { if (typeof value[WORKSPACE_KEY] === "string") workspaceInput.value = value[WORKSPACE_KEY] as string; });
-  button.addEventListener("click", () => {
-    const workspace = workspaceInput.value.trim();
-    const goal = goalInput.value.trim();
-    if (!workspace || !goal) { status.textContent = "请填写工作区和任务"; return; }
-    chrome.storage.local.set({ [WORKSPACE_KEY]: workspace });
-    button.disabled = true;
-    void runAgent(goal, workspace, status, output)
-      .catch((error: unknown) => { status.textContent = `Agent 失败：${error instanceof Error ? error.message : String(error)}`; })
-      .finally(() => { button.disabled = false; });
+try {
+  chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
+    if (!message || typeof message !== "object") return false;
+    const request = message as Record<string, unknown>;
+    if (request.type !== "chatgpt.start") return false;
+    const workspace = typeof request.workspace === "string" ? request.workspace : "";
+    const goal = typeof request.goal === "string" ? request.goal : "";
+    if (!workspace || !goal) { sendResponse({ ok: false, error: "Workspace and goal are required" }); return false; }
+    void runAgent(workspace, goal)
+      .then(() => sendResponse({ ok: true }))
+      .catch((error: unknown) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+    return true;
   });
-}
-
-if (location.hostname === "chatgpt.com" || location.hostname === "chat.openai.com") {
-  const boot = () => mountPanel();
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot, { once: true }); else boot();
-  new MutationObserver(() => { if (!document.getElementById(PANEL_ID)) mountPanel(); }).observe(document.documentElement, { childList: true, subtree: true });
+} catch {
+  // The content script can outlive an extension reload. Do not throw from the stale context.
 }
 
 export {};
