@@ -23,6 +23,11 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
   });
   const wsServer = new WebSocketServer({ server: httpServer });
 
+  const broadcast = (message: unknown): void => {
+    const payload = JSON.stringify(message);
+    for (const client of clients) safeSend(client, payload);
+  };
+
   wsServer.on("connection", (socket) => {
     clients.add(socket);
     socket.on("message", async (raw: Buffer) => {
@@ -30,7 +35,9 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
       try { message = JSON.parse(raw.toString()) as RpcMessage; } catch { safeSend(socket, { jsonrpc: "2.0", id: "invalid", error: { code: -32700, message: "Invalid JSON" } }); return; }
 
       if ("method" in message && message.method === "approval.respond" && "id" in message) {
-        const response = asApprovalResponse(message.params); const request = pending.get(response.requestId);
+        let response: ApprovalResponse;
+        try { response = asApprovalResponse(message.params); } catch (error) { reply(socket, message.id, undefined, { code: -32602, message: error instanceof Error ? error.message : String(error) }); return; }
+        const request = pending.get(response.requestId);
         if (!request) { reply(socket, message.id, undefined, { code: -32004, message: "Approval request not found or already resolved" }); return; }
         pending.delete(response.requestId);
         if (response.decision === "deny") { reply(request.socket, request.id, { ok: false, error: "Permission denied by user" }); reply(socket, message.id, { ok: true }); return; }
@@ -54,9 +61,9 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
           const tool = tools.get(call.tool); if (!tool) throw new Error(`Unknown tool: ${call.tool}`);
           const decision = sessionAllowed.has(tool.descriptor.name) ? "allow" : permissions.decide({ tool: tool.descriptor.name, risk: tool.descriptor.risk, description: tool.descriptor.description });
           if (decision === "ask") {
-            const requestId = crypto.randomUUID(); pending.set(requestId, { socket, id, call, toolName: tool.descriptor.name });
-            const approval = { jsonrpc: "2.0", method: "approval.request", params: { requestId, tool: tool.descriptor.name, risk: tool.descriptor.risk, description: tool.descriptor.description, arguments: call.arguments } };
-            broadcast(approval);
+            const requestId = crypto.randomUUID();
+            pending.set(requestId, { socket, id, call, toolName: tool.descriptor.name });
+            broadcast({ jsonrpc: "2.0", method: "approval.request", params: { requestId, tool: tool.descriptor.name, risk: tool.descriptor.risk, description: tool.descriptor.description, arguments: call.arguments } });
             return;
           }
           if (decision !== "allow") { reply(socket, id, { ok: false, error: `Permission ${decision} for ${tool.descriptor.name}` }); return; }
@@ -73,11 +80,9 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
   return { httpServer, wsServer, port };
 }
 
-function broadcast(message: unknown): void {
-  const payload = JSON.stringify(message);
-  for (const client of clients) if (client.readyState === 1) safeSend(client, payload);
+function safeSend(socket: WebSocket, message: unknown): void {
+  if (socket.readyState === 1) socket.send(typeof message === "string" ? message : JSON.stringify(message));
 }
-function safeSend(socket: WebSocket, message: unknown): void { if (socket.readyState === 1) socket.send(typeof message === "string" ? message : JSON.stringify(message)); }
 function asRecord(value: unknown): Record<string, unknown> { if (!value || typeof value !== "object") throw new Error("params must be an object"); return value as Record<string, unknown>; }
 function requiredString(value: unknown, name: string): string { if (typeof value !== "string" || !value.trim()) throw new Error(`${name} must be a non-empty string`); return value; }
 function asApprovalResponse(value: unknown): ApprovalResponse { const record = asRecord(value); const requestId = requiredString(record.requestId, "requestId"); const decision = record.decision; if (decision !== "allow_once" && decision !== "allow_session" && decision !== "deny") throw new Error("Invalid approval decision"); return { requestId, decision }; }
