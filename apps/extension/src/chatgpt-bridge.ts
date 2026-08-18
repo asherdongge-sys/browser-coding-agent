@@ -1,11 +1,12 @@
 type ToolCall = { tool: string; arguments: Record<string, unknown> };
 type ToolResult = { ok: boolean; result?: unknown; error?: string };
-type RuntimeResponse = { result?: unknown; error?: { message?: string } };
+type RuntimeResponse = { result?: unknown; error?: { message?: string }; ok?: boolean };
 type RuntimeToolDescription = { name: string; description?: string; inputSchema?: unknown };
 type AgentEvent = { type: "state.changed" | "tool.call" | "tool.result"; state?: string; call?: ToolCall; result?: ToolResult };
 type AssistantMessage = { text: string; node: HTMLElement };
 const MAX_ROUNDS = 12;
 const RESPONSE_TIMEOUT_MS = 120000;
+const RPC_TIMEOUT_MS = 15000;
 let running = false;
 
 function emit(event: AgentEvent): void {
@@ -13,8 +14,16 @@ function emit(event: AgentEvent): void {
 }
 function runtimeRpc(message: Record<string, unknown>): Promise<RuntimeResponse> {
   return new Promise((resolve, reject) => {
-    try { chrome.runtime.sendMessage(message, (response: RuntimeResponse | undefined) => { if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; } if (!response) { reject(new Error("Extension returned no response")); return; } resolve(response); }); }
-    catch (error) { reject(error instanceof Error ? error : new Error(String(error))); }
+    let settled = false;
+    const finish = (fn: () => void) => { if (settled) return; settled = true; window.clearTimeout(timer); fn(); };
+    const timer = window.setTimeout(() => finish(() => reject(new Error("Timed out waiting for local Runtime"))), RPC_TIMEOUT_MS);
+    try {
+      chrome.runtime.sendMessage(message, (response: RuntimeResponse | undefined) => {
+        if (chrome.runtime.lastError) { finish(() => reject(new Error(chrome.runtime.lastError?.message ?? "Extension message failed"))); return; }
+        if (!response) { finish(() => reject(new Error("Extension returned no response"))); return; }
+        finish(() => resolve(response));
+      });
+    } catch (error) { finish(() => reject(error instanceof Error ? error : new Error(String(error)))); }
   });
 }
 function getComposer(): HTMLTextAreaElement | HTMLElement | null { return document.querySelector<HTMLTextAreaElement>("textarea") ?? document.querySelector<HTMLElement>("[contenteditable='true'][role='textbox']") ?? document.querySelector<HTMLElement>("[contenteditable='true']"); }
@@ -24,17 +33,14 @@ function setComposerValue(composer: HTMLTextAreaElement | HTMLElement, text: str
   composer.textContent = text; composer.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
 }
 async function submitToChatGPT(text: string): Promise<void> {
+  emit({ type: "state.changed", state: "submitting-prompt" });
   const composer = getComposer();
   if (!composer) throw new Error("ChatGPT composer was not found. Open a normal ChatGPT conversation.");
   setComposerValue(composer, text);
   await new Promise((resolve) => setTimeout(resolve, 300));
-
-  const sendButton = document.querySelector<HTMLButtonElement>(
-    'button[data-testid="send-button"], button[aria-label="Send prompt"], button[aria-label="Send message"]',
-  );
-  if (sendButton && !sendButton.disabled) {
-    sendButton.click();
-  } else {
+  const sendButton = document.querySelector<HTMLButtonElement>('button[data-testid="send-button"], button[aria-label="Send prompt"], button[aria-label="Send message"]');
+  if (sendButton && !sendButton.disabled) sendButton.click();
+  else {
     composer.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true, cancelable: true }));
     composer.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", bubbles: true }));
   }
@@ -46,6 +52,7 @@ function assistantMessages(): AssistantMessage[] {
   return Array.from(document.querySelectorAll<HTMLElement>("article")).map((node) => ({ text: node.innerText.trim(), node })).filter((item) => item.text.length > 0);
 }
 async function waitForAssistantResponse(previousNode: HTMLElement | null): Promise<string> {
+  emit({ type: "state.changed", state: "waiting-assistant" });
   const started = Date.now(); let lastText = ""; let stableSince = 0;
   while (Date.now() - started < RESPONSE_TIMEOUT_MS) {
     const messages = assistantMessages();
@@ -70,17 +77,32 @@ function finalPrompt(goal: string, history: Array<{ call: ToolCall; result: Tool
 async function runAgent(workspace: string, goal: string): Promise<void> {
   if (running) return; running = true; emit({ type: "state.changed", state: "planning" });
   try {
-    const selected = await runtimeRpc({ jsonrpc: "2.0", id: crypto.randomUUID(), method: "workspace.select", params: { path: workspace } }); if (selected.error) throw new Error(selected.error.message ?? "Workspace selection failed");
-    const toolsResponse = await runtimeRpc({ jsonrpc: "2.0", id: crypto.randomUUID(), method: "tools.list" }); if (toolsResponse.error) throw new Error(toolsResponse.error.message ?? "Unable to list tools");
-    const tools: RuntimeToolDescription[] = Array.isArray(toolsResponse.result) ? toolsResponse.result as RuntimeToolDescription[] : []; const history: Array<{ call: ToolCall; result: ToolResult }> = [];
+    emit({ type: "state.changed", state: "workspace-select" });
+    const selected = await runtimeRpc({ jsonrpc: "2.0", id: crypto.randomUUID(), method: "workspace.select", params: { path: workspace } });
+    if (selected.error) throw new Error(selected.error.message ?? "Workspace selection failed");
+    emit({ type: "state.changed", state: "tools-list" });
+    const toolsResponse = await runtimeRpc({ jsonrpc: "2.0", id: crypto.randomUUID(), method: "tools.list" });
+    if (toolsResponse.error) throw new Error(toolsResponse.error.message ?? "Unable to list tools");
+    const tools: RuntimeToolDescription[] = Array.isArray(toolsResponse.result) ? toolsResponse.result as RuntimeToolDescription[] : [];
+    const history: Array<{ call: ToolCall; result: ToolResult }> = [];
     for (let round = 0; round < MAX_ROUNDS; round += 1) {
       const beforeNode = assistantMessages().at(-1)?.node ?? null;
       await submitToChatGPT(plannerPrompt(goal, tools, history));
       const responseText = await waitForAssistantResponse(beforeNode);
       const plan = parseToolPlan(responseText);
-      if (plan.done) { const finalBefore = assistantMessages().at(-1)?.node ?? null; await submitToChatGPT(finalPrompt(goal, history)); await waitForAssistantResponse(finalBefore); emit({ type: "state.changed", state: "completed" }); return; }
+      if (plan.done) {
+        const finalBefore = assistantMessages().at(-1)?.node ?? null;
+        await submitToChatGPT(finalPrompt(goal, history));
+        await waitForAssistantResponse(finalBefore);
+        emit({ type: "state.changed", state: "completed" }); return;
+      }
       emit({ type: "state.changed", state: "inspecting" });
-      for (const call of plan.calls) { emit({ type: "tool.call", call }); const response = await runtimeRpc({ jsonrpc: "2.0", id: crypto.randomUUID(), method: "tool.call", params: { call } }); const result: ToolResult = response.error ? { ok: false, error: response.error.message ?? "Runtime tool call failed" } : response.result as ToolResult; history.push({ call, result }); emit({ type: "tool.result", call, result }); }
+      for (const call of plan.calls) {
+        emit({ type: "tool.call", call });
+        const response = await runtimeRpc({ jsonrpc: "2.0", id: crypto.randomUUID(), method: "tool.call", params: { call } });
+        const result: ToolResult = response.error ? { ok: false, error: response.error.message ?? "Runtime tool call failed" } : response.result as ToolResult;
+        history.push({ call, result }); emit({ type: "tool.result", call, result });
+      }
       emit({ type: "state.changed", state: "planning" });
     }
     throw new Error(`Agent stopped after ${MAX_ROUNDS} planning rounds`);
