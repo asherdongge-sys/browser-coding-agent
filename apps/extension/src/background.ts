@@ -7,7 +7,10 @@ let currentApproval: ApprovalRequest | undefined;
 const pendingRpc = new Map<string, (response: unknown) => void>();
 
 const log = (...args: unknown[]) => console.log("[BrowserCodingAgent]", ...args);
-function broadcast(message: unknown): void { chrome.runtime.sendMessage(message).catch(() => undefined); }
+function broadcast(message: unknown): void {
+  chrome.runtime.sendMessage(message, () => { void chrome.runtime.lastError; });
+}
+
 async function openApprovalWindow(): Promise<void> {
   if (!currentApproval) return;
   const url = chrome.runtime.getURL(`${APPROVAL_URL}?requestId=${encodeURIComponent(currentApproval.requestId)}`);
@@ -15,6 +18,7 @@ async function openApprovalWindow(): Promise<void> {
   if (existing[0]?.id !== undefined) { await chrome.tabs.update(existing[0].id, { active: true }); return; }
   await chrome.windows.create({ url, type: "popup", width: 440, height: 620 });
 }
+
 function connectRuntime(): WebSocket {
   if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return socket;
   const ws = new WebSocket(RUNTIME_URL);
@@ -26,7 +30,8 @@ function connectRuntime(): WebSocket {
     ws.send(JSON.stringify({ jsonrpc: "2.0", id: crypto.randomUUID(), method: "runtime.ping" }));
   });
   ws.addEventListener("message", (event) => {
-    let message: unknown; try { message = JSON.parse(String(event.data)); } catch (error) { log("invalid runtime message", error); return; }
+    let message: unknown;
+    try { message = JSON.parse(String(event.data)); } catch (error) { log("invalid runtime message", error); return; }
     if (!message || typeof message !== "object") return;
     const data = message as { method?: string; params?: Partial<ApprovalRequest>; id?: string | number; result?: unknown; error?: unknown };
     if (data.id !== undefined && !data.method) {
@@ -34,10 +39,11 @@ function connectRuntime(): WebSocket {
       if (resolve) { pendingRpc.delete(String(data.id)); resolve(data); }
       return;
     }
-    log("runtime message", data.method ?? "notification");
     if (data.method === "approval.request" && data.params?.requestId && data.params.tool && data.params.risk && data.params.description) {
       currentApproval = { requestId: data.params.requestId, tool: data.params.tool, risk: data.params.risk, description: data.params.description, arguments: data.params.arguments };
-      log("approval request", currentApproval); broadcast({ type: "approval.request", request: currentApproval }); void openApprovalWindow(); return;
+      broadcast({ type: "approval.request", request: currentApproval });
+      void openApprovalWindow();
+      return;
     }
     if (data.method === "agent.event") broadcast({ type: "agent.event", params: data.params });
   });
@@ -50,6 +56,7 @@ function connectRuntime(): WebSocket {
   ws.addEventListener("error", (event) => log("runtime socket error", event));
   return ws;
 }
+
 function sendToRuntime(message: Record<string, unknown>, sendResponse: (response: unknown) => void): void {
   const ws = connectRuntime();
   const id = typeof message.id === "string" || typeof message.id === "number" ? String(message.id) : crypto.randomUUID();
@@ -61,16 +68,37 @@ function sendToRuntime(message: Record<string, unknown>, sendResponse: (response
   };
   if (ws.readyState === WebSocket.OPEN) send(); else ws.addEventListener("open", send, { once: true });
 }
-chrome.runtime.onInstalled.addListener(() => { log("service worker installed"); connectRuntime(); });
-chrome.runtime.onStartup.addListener(() => { log("service worker startup"); connectRuntime(); });
-connectRuntime();
-chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
+
+chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
   if (!message || typeof message !== "object") return false;
   const request = message as Record<string, unknown>;
+
+  if (request.type === "chatgpt.start") {
+    const workspace = typeof request.workspace === "string" ? request.workspace : "";
+    const goal = typeof request.goal === "string" ? request.goal : "";
+    if (!workspace || !goal) { sendResponse({ ok: false, error: "Workspace and goal are required" }); return false; }
+    void chrome.tabs.query({ active: true, lastFocusedWindow: true }).then(async (tabs) => {
+      const tab = tabs[0];
+      if (!tab?.id) { sendResponse({ ok: false, error: "No active tab" }); return; }
+      const url = tab.url ?? "";
+      if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(url)) { sendResponse({ ok: false, error: "Open a ChatGPT tab first" }); return; }
+      try {
+        await chrome.tabs.sendMessage(tab.id, { type: "chatgpt.start", workspace, goal });
+        sendResponse({ ok: true });
+      } catch (error) {
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      }
+    });
+    return true;
+  }
+
   if (request.type === "approval.current") { sendResponse({ request: currentApproval }); return false; }
   if (request.type === "approval.respond") {
-    const requestId = typeof request.requestId === "string" ? request.requestId : ""; const decision = request.decision;
-    if (!requestId || (decision !== "allow_once" && decision !== "allow_session" && decision !== "deny")) { sendResponse({ ok: false, error: "Invalid approval response" }); return false; }
+    const requestId = typeof request.requestId === "string" ? request.requestId : "";
+    const decision = request.decision;
+    if (!requestId || (decision !== "allow_once" && decision !== "allow_session" && decision !== "deny")) {
+      sendResponse({ ok: false, error: "Invalid approval response" }); return false;
+    }
     sendToRuntime({ jsonrpc: "2.0", id: crypto.randomUUID(), method: "approval.respond", params: { requestId, decision } }, sendResponse);
     if (currentApproval?.requestId === requestId) currentApproval = undefined;
     return true;
