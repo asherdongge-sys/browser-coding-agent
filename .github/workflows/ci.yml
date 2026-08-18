@@ -33,20 +33,5 @@ jobs:
             sleep 1
           done
           cat /tmp/runtime-health.json
-          node --input-type=module <<'NODE'
-          import WebSocket from 'ws';
-          const socket = new WebSocket('ws://127.0.0.1:4317');
-          await new Promise((resolve, reject) => {
-            const timeout = setTimeout(() => reject(new Error('WebSocket smoke test timed out')), 5000);
-            socket.on('open', () => socket.send(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'runtime.ping' })));
-            socket.on('message', (raw) => {
-              clearTimeout(timeout);
-              const message = JSON.parse(raw.toString());
-              if (message.result?.ok !== true) reject(new Error(`Unexpected response: ${raw}`));
-              else resolve();
-              socket.close();
-            });
-            socket.on('error', reject);
-          });
-          NODE
+          pnpm --filter @browser-coding-agent/runtime exec node scripts/smoke.mjs
           cat /tmp/browser-coding-agent-runtime.log
