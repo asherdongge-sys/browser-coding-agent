@@ -6,7 +6,7 @@ import { PermissionManager } from "@browser-coding-agent/permissions";
 import { ToolRegistry, WorkspaceManager, createFilesystemTools, createTerminalTools } from "@browser-coding-agent/tools";
 
 export const DEFAULT_PORT = 4317;
-type PendingApproval = { socket: WebSocket | undefined; id: string | number | undefined; call: ToolCall; toolName: string; resolve: (result: ToolResult) => void };
+type PendingApproval = { socket: WebSocket | undefined; id: string | number | undefined; call: ToolCall; toolName: string; resolve: (result: ToolResult<unknown>) => void };
 
 export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGENT_PORT ?? DEFAULT_PORT)) {
   const workspace = new WorkspaceManager();
@@ -25,19 +25,25 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
   const broadcast = (message: unknown): void => { const payload = JSON.stringify(message); for (const client of clients) safeSend(client, payload); };
   const emitAgentEvent = (event: AgentEvent): void => broadcast({ jsonrpc: "2.0", method: "agent.event", params: event });
 
-  const executeTool = (call: ToolCall, requester?: WebSocket, requestId?: string | number): Promise<ToolResult> => {
+  const executeTool = <TArguments = unknown, TResult = unknown>(call: ToolCall<TArguments>, requester?: WebSocket, requestId?: string | number): Promise<ToolResult<TResult>> => {
     const tool = tools.get(call.tool);
     if (!tool) return Promise.resolve({ ok: false, error: `Unknown tool: ${call.tool}` });
     const decision = sessionAllowed.has(tool.descriptor.name) ? "allow" : permissions.decide({ tool: tool.descriptor.name, risk: tool.descriptor.risk, description: tool.descriptor.description });
     if (decision === "ask") {
-      return new Promise<ToolResult>((resolve) => {
+      return new Promise<ToolResult<TResult>>((resolve) => {
         const approvalId = crypto.randomUUID();
-        pending.set(approvalId, { socket: requester, id: requestId, call, toolName: tool.descriptor.name, resolve });
+        pending.set(approvalId, {
+          socket: requester,
+          id: requestId,
+          call,
+          toolName: tool.descriptor.name,
+          resolve: (result) => resolve(result as ToolResult<TResult>),
+        });
         broadcast({ jsonrpc: "2.0", method: "approval.request", params: { requestId: approvalId, tool: tool.descriptor.name, risk: tool.descriptor.risk, description: tool.descriptor.description, arguments: call.arguments } });
       });
     }
     if (decision !== "allow") return Promise.resolve({ ok: false, error: `Permission ${decision} for ${tool.descriptor.name}` });
-    return tool.execute(call.arguments).then((result) => result as ToolResult);
+    return tool.execute(call.arguments).then((result) => result as ToolResult<TResult>);
   };
 
   const planner = async (goal: string): Promise<readonly ToolCall[]> => {
@@ -70,7 +76,7 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
           if (response.decision === "allow_session") sessionAllowed.add(request.toolName);
           const tool = tools.get(request.toolName);
           if (!tool) request.resolve({ ok: false, error: "Tool no longer available" });
-          else { try { request.resolve(await tool.execute(request.call.arguments) as ToolResult); } catch (error) { request.resolve({ ok: false, error: error instanceof Error ? error.message : String(error) }); } }
+          else { try { request.resolve(await tool.execute(request.call.arguments)); } catch (error) { request.resolve({ ok: false, error: error instanceof Error ? error.message : String(error) }); } }
         }
         reply(socket, message.id, { ok: true });
         return;
