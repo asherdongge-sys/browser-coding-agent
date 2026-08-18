@@ -1,12 +1,10 @@
 type ToolCall = { tool: string; arguments: Record<string, unknown> };
 type ToolResult = { ok: boolean; result?: unknown; error?: string };
-
 type RuntimeResponse = { result?: unknown; error?: { message?: string } };
 
 const PANEL_ID = "bca-chatgpt-bridge";
 const WORKSPACE_KEY = "bca.workspace";
 const MAX_ROUNDS = 12;
-
 let running = false;
 
 function runtimeRpc(message: Record<string, unknown>): Promise<RuntimeResponse> {
@@ -20,8 +18,9 @@ function runtimeRpc(message: Record<string, unknown>): Promise<RuntimeResponse> 
 }
 
 function getComposer(): HTMLTextAreaElement | HTMLElement | null {
-  return document.querySelector<HTMLTextAreaElement>("textarea")
-    ?? document.querySelector<HTMLElement>("[contenteditable='true']");
+  return document.querySelector<HTMLTextAreaElement>("textarea:not(#bca-goal)")
+    ?? Array.from(document.querySelectorAll<HTMLElement>("[contenteditable='true']")).find((node) => !node.closest(`#${PANEL_ID}`))
+    ?? null;
 }
 
 function setComposerValue(composer: HTMLTextAreaElement | HTMLElement, text: string): void {
@@ -40,9 +39,9 @@ async function submitToChatGPT(text: string): Promise<void> {
   const composer = getComposer();
   if (!composer) throw new Error("ChatGPT composer was not found. Open a normal ChatGPT conversation.");
   setComposerValue(composer, text);
-  await new Promise((resolve) => setTimeout(resolve, 100));
+  await new Promise((resolve) => setTimeout(resolve, 150));
   composer.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true }));
-  await new Promise((resolve) => setTimeout(resolve, 250));
+  await new Promise((resolve) => setTimeout(resolve, 300));
 }
 
 function assistantArticles(): HTMLElement[] {
@@ -58,7 +57,7 @@ async function waitForAssistantResponse(previousCount: number): Promise<string> 
     if (articles.length > previousCount) {
       const text = articles.at(-1)?.innerText.trim() ?? "";
       if (text && text !== stableText) { stableText = text; stableSince = Date.now(); }
-      if (stableText && Date.now() - stableSince > 900) return stableText;
+      if (stableText && Date.now() - stableSince > 1200) return stableText;
     }
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
