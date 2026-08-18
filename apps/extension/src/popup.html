@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Browser Coding Agent</title>
+  <style>
+    body { width: 360px; margin: 0; padding: 20px; font: 14px system-ui, sans-serif; background: #f7f7f8; color: #202124; }
+    h1 { font-size: 18px; margin: 0 0 16px; }
+    .card { background: white; border: 1px solid #ddd; border-radius: 12px; padding: 14px; }
+    .muted { color: #666; font-size: 12px; }
+    .command { margin: 12px 0; padding: 10px; border-radius: 8px; background: #1f2328; color: #fff; font-family: ui-monospace, monospace; white-space: pre-wrap; word-break: break-word; }
+    .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 14px; }
+    button { border: 0; border-radius: 8px; padding: 10px; cursor: pointer; font-weight: 600; }
+    #deny { background: #eee; } #allow { background: #111; color: white; }
+    #session { grid-column: 1 / -1; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <h1>Browser Coding Agent</h1>
+  <div id="status" class="card">正在连接本地 Runtime…</div>
+  <div id="approval" class="card hidden">
+    <div class="muted">需要你的授权</div>
+    <p id="description"></p>
+    <div id="command" class="command"></div>
+    <div class="muted">风险等级：<span id="risk"></span></div>
+    <div class="actions">
+      <button id="deny">拒绝</button>
+      <button id="allow">允许一次</button>
+      <button id="session">本会话始终允许</button>
+    </div>
+  </div>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>
