@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Browser Coding Agent — 授权</title>
+  <style>
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f6f7f9; color: #202124; font: 14px system-ui, sans-serif; }
+    main { width: min(390px, calc(100vw - 32px)); box-sizing: border-box; background: white; border: 1px solid #ddd; border-radius: 16px; padding: 24px; box-shadow: 0 12px 40px rgba(0,0,0,.12); }
+    h1 { margin: 0 0 8px; font-size: 20px; } .muted { color: #6b7280; font-size: 12px; }
+    #description { line-height: 1.5; } .command { margin: 16px 0; padding: 12px; background: #202124; color: white; border-radius: 9px; font: 13px ui-monospace, monospace; white-space: pre-wrap; word-break: break-word; }
+    .risk { display: inline-block; margin-top: 4px; padding: 4px 8px; border-radius: 999px; background: #fff3cd; font-size: 11px; font-weight: 700; }
+    .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 20px; } button { padding: 11px; border: 0; border-radius: 9px; font-weight: 700; cursor: pointer; } #deny { background: #eee; } #allow { background: #111; color: #fff; } #session { grid-column: 1 / -1; background: #e8eefc; }
+    #message { margin-top: 14px; text-align: center; color: #555; }
+  </style>
+</head>
+<body>
+<main>
+  <div class="muted">BROWSER CODING AGENT</div>
+  <h1>需要你的授权</h1>
+  <p id="description">正在读取请求…</p>
+  <div id="command" class="command">—</div>
+  <div class="muted">风险等级</div><div id="risk" class="risk">—</div>
+  <div class="actions">
+    <button id="deny">拒绝</button><button id="allow">允许一次</button><button id="session">本会话始终允许</button>
+  </div>
+  <div id="message"></div>
+</main>
+<script type="module" src="approval.js"></script>
+</body>
+</html>
