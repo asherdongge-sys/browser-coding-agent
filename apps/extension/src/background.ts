@@ -69,6 +69,17 @@ function sendToRuntime(message: Record<string, unknown>, sendResponse: (response
   if (ws.readyState === WebSocket.OPEN) send(); else ws.addEventListener("open", send, { once: true });
 }
 
+async function ensureChatGptBridge(tabId: number): Promise<void> {
+  try {
+    await chrome.tabs.sendMessage(tabId, { type: "chatgpt.ping" });
+    return;
+  } catch {
+    // The content script may not have been injected into an already-open tab.
+  }
+  await chrome.scripting.executeScript({ target: { tabId }, files: ["chatgpt-bridge.js"] });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+}
+
 chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
   if (!message || typeof message !== "object") return false;
   const request = message as Record<string, unknown>;
@@ -83,8 +94,9 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
       const url = tab.url ?? "";
       if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(url)) { sendResponse({ ok: false, error: "Open a ChatGPT tab first" }); return; }
       try {
-        await chrome.tabs.sendMessage(tab.id, { type: "chatgpt.start", workspace, goal });
-        sendResponse({ ok: true });
+        await ensureChatGptBridge(tab.id);
+        const response = await chrome.tabs.sendMessage(tab.id, { type: "chatgpt.start", workspace, goal });
+        sendResponse(response ?? { ok: true });
       } catch (error) {
         sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
       }
