@@ -1,7 +1,6 @@
 type ToolCall = { tool: string; arguments: Record<string, unknown> };
 type ToolResult = { ok: boolean; result?: unknown; error?: string };
 type RuntimeResponse = { result?: unknown; error?: { message?: string } };
-
 type RuntimeToolDescription = { name: string; description?: string; inputSchema?: unknown };
 
 const PANEL_ID = "bca-chatgpt-bridge";
@@ -20,8 +19,7 @@ function runtimeRpc(message: Record<string, unknown>): Promise<RuntimeResponse> 
 }
 
 function getComposer(): HTMLTextAreaElement | HTMLElement | null {
-  return document.querySelector<HTMLTextAreaElement>("textarea:not(#bca-goal)")
-    ?? document.querySelector<HTMLElement>("[contenteditable='true']");
+  return document.querySelector<HTMLTextAreaElement>("textarea:not(#bca-goal)") ?? document.querySelector<HTMLElement>("[contenteditable='true']");
 }
 
 function setComposerValue(composer: HTMLTextAreaElement | HTMLElement, text: string): void {
@@ -99,6 +97,18 @@ function plannerPrompt(goal: string, tools: RuntimeToolDescription[], history: A
   ].join("\n\n");
 }
 
+function resultSummaryPrompt(goal: string, history: Array<{ call: ToolCall; result: ToolResult }>): string {
+  return [
+    "The Browser Coding Agent has finished executing the requested local tools.",
+    "Now answer the user's original request in normal conversational language.",
+    "Use the execution history below as the source of truth. Do not claim actions that are not confirmed by successful tool results.",
+    "For a file-list or inspection request, explicitly show the useful files and important contents discovered.",
+    "If something failed, explain the failure and what was or was not completed.",
+    `Original goal: ${goal}`,
+    `Execution history: ${JSON.stringify(history)}`,
+  ].join("\n\n");
+}
+
 async function runAgent(goal: string, workspace: string, status: HTMLElement): Promise<void> {
   if (running) return;
   running = true;
@@ -115,7 +125,14 @@ async function runAgent(goal: string, workspace: string, status: HTMLElement): P
       await submitToChatGPT(plannerPrompt(goal, tools, history));
       const responseText = await waitForAssistantResponse(articlesBefore);
       const plan = parseToolPlan(responseText);
-      if (plan.done) { status.textContent = "Agent 已完成"; return; }
+      if (plan.done) {
+        status.textContent = "正在生成最终结果…";
+        const finalArticlesBefore = assistantArticles().length;
+        await submitToChatGPT(resultSummaryPrompt(goal, history));
+        await waitForAssistantResponse(finalArticlesBefore);
+        status.textContent = "Agent 已完成";
+        return;
+      }
       for (const call of plan.calls) {
         status.textContent = `执行 ${call.tool}…`;
         const response = await runtimeRpc({ jsonrpc: "2.0", id: crypto.randomUUID(), method: "tool.call", params: { call } });
