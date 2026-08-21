@@ -8,6 +8,7 @@ const STABILITY_MS = 1000;
 export type PlaywrightBrowserProviderOptions = {
   profileDir?: string;
   headless?: boolean;
+  executablePath?: string;
   onEvent?: (event: BrowserAgentEvent) => void;
 };
 
@@ -19,20 +20,24 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
   private readonly agents = new Map<string, ManagedAgent>();
   private readonly profileDir: string;
   private readonly headless: boolean;
+  private readonly executablePath: string | undefined;
   private readonly onEvent?: (event: BrowserAgentEvent) => void;
 
   constructor(options: PlaywrightBrowserProviderOptions = {}) {
     this.profileDir = options.profileDir ?? process.env.BROWSER_CODING_AGENT_PROFILE ?? ".browser-coding-agent/chromium";
     this.headless = options.headless ?? process.env.BROWSER_CODING_AGENT_HEADLESS === "1";
+    this.executablePath = options.executablePath ?? process.env.BROWSER_EXECUTABLE?.trim() || undefined;
     this.onEvent = options.onEvent;
   }
 
   async start(): Promise<void> {
     if (this.context) return;
-    this.context = await chromium.launchPersistentContext(this.profileDir, {
+    const launchOptions = {
       headless: this.headless,
       viewport: { width: 1440, height: 900 },
-    });
+      ...(this.executablePath ? { executablePath: this.executablePath } : {}),
+    };
+    this.context = await chromium.launchPersistentContext(this.profileDir, launchOptions);
     for (const page of this.context.pages()) this.observePage(page);
   }
 
