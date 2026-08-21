@@ -17,6 +17,8 @@ type ManagedAgent = BrowserAgent & { page: Page };
 export class PlaywrightBrowserProvider implements BrowserProvider {
   readonly kind = "playwright" as const;
   private context: BrowserContext | undefined;
+  private startPromise: Promise<void> | undefined;
+  private stopping = false;
   private readonly agents = new Map<string, ManagedAgent>();
   private readonly profileDir: string;
   private readonly headless: boolean;
@@ -32,24 +34,13 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
 
   async start(): Promise<void> {
     if (this.context) return;
-    const launchOptions = {
-      headless: this.headless,
-      viewport: { width: 1440, height: 900 },
-      ...(this.executablePath ? { executablePath: this.executablePath } : {}),
-    };
-    this.context = await chromium.launchPersistentContext(this.profileDir, launchOptions);
+    if (this.stopping) throw new Error("Browser provider is stopping");
+    if (this.startPromise) return this.startPromise;
 
-    // A persistent context may start with an about:blank page. Navigate one visible
-    // page immediately so startup itself has a deterministic ChatGPT target.
-    const pages = this.context.pages();
-    const startupPage = pages[0] ?? await this.context.newPage();
-    this.observePage(startupPage);
-    if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(startupPage.url())) {
-      await startupPage.goto(CHATGPT_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
-    }
-    for (const page of this.context.pages()) {
-      if (page !== startupPage) this.observePage(page);
-    }
+    this.startPromise = this.startInternal().finally(() => {
+      this.startPromise = undefined;
+    });
+    return this.startPromise;
   }
 
   async listAgents(): Promise<BrowserAgent[]> {
@@ -58,7 +49,8 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
 
   async createAgent(title: string, prompt: string): Promise<BrowserAgent> {
     await this.start();
-    const page = await this.context!.newPage();
+    if (this.stopping || !this.context) throw new Error("Browser provider is not running");
+    const page = await this.context.newPage();
     this.observePage(page);
     const agent: ManagedAgent = {
       id: crypto.randomUUID(),
@@ -89,14 +81,59 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
   }
 
   async stop(): Promise<void> {
-    if (!this.context) return;
-    await this.context.close();
+    this.stopping = true;
+    const context = this.context;
     this.context = undefined;
     this.agents.clear();
+
+    if (context) {
+      try {
+        await context.close();
+      } catch (error) {
+        console.error("[BrowserCodingAgent] Playwright context close failed:", error);
+      }
+    }
+
+    if (this.startPromise) {
+      try {
+        await this.startPromise;
+      } catch {
+        // Startup failures are reported by the runtime startup handler.
+      }
+    }
+  }
+
+  private async startInternal(): Promise<void> {
+    const launchOptions = {
+      headless: this.headless,
+      viewport: { width: 1440, height: 900 },
+      ...(this.executablePath ? { executablePath: this.executablePath } : {}),
+    };
+    const context = await chromium.launchPersistentContext(this.profileDir, launchOptions);
+    this.context = context;
+
+    if (this.stopping) {
+      await context.close();
+      this.context = undefined;
+      throw new Error("Browser provider stopped during startup");
+    }
+
+    // A persistent context may start with an about:blank page. Navigate one visible
+    // page immediately so startup itself has a deterministic ChatGPT target.
+    const pages = context.pages();
+    const startupPage = pages[0] ?? await context.newPage();
+    this.observePage(startupPage);
+    if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(startupPage.url())) {
+      await startupPage.goto(CHATGPT_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
+    }
+    for (const page of context.pages()) {
+      if (page !== startupPage) this.observePage(page);
+    }
   }
 
   private async initializeAgent(agent: ManagedAgent): Promise<void> {
     try {
+      if (this.stopping) throw new Error("Browser provider is stopping");
       if (agent.page.isClosed()) throw new Error("Agent browser page is closed");
       this.patch(agent, { status: "opening-chatgpt", lastError: "" });
       if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(agent.page.url())) {
@@ -114,7 +151,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
         await this.send(agent, prompt);
       }
     } catch (error) {
-      this.patch(agent, { status: "failed", lastError: error instanceof Error ? error.message : String(error) });
+      if (!this.stopping) this.patch(agent, { status: "failed", lastError: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -136,6 +173,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
   }
 
   private async ensurePageReady(agent: ManagedAgent): Promise<void> {
+    if (this.stopping) throw new Error("Browser provider is stopping");
     if (agent.page.isClosed()) throw new Error("Agent browser page is closed");
     if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(agent.page.url())) {
       await agent.page.goto(CHATGPT_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
