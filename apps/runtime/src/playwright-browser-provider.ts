@@ -36,10 +36,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     if (this.context) return;
     if (this.stopping) throw new Error("Browser provider is stopping");
     if (this.startPromise) return this.startPromise;
-
-    this.startPromise = this.startInternal().finally(() => {
-      this.startPromise = undefined;
-    });
+    this.startPromise = this.startInternal().finally(() => { this.startPromise = undefined; });
     return this.startPromise;
   }
 
@@ -86,21 +83,12 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     const context = this.context;
     this.context = undefined;
     this.agents.clear();
-
     if (context) {
-      try {
-        await context.close();
-      } catch (error) {
-        console.error("[BrowserCodingAgent] Playwright context close failed:", error);
-      }
+      try { await context.close(); }
+      catch (error) { console.error("[BrowserCodingAgent] Playwright context close failed:", error); }
     }
-
     if (this.startPromise) {
-      try {
-        await this.startPromise;
-      } catch {
-        // Startup failures are reported by the runtime startup handler.
-      }
+      try { await this.startPromise; } catch { /* startup failure already reported */ }
     }
   }
 
@@ -108,26 +96,25 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     const launchOptions = {
       headless: this.headless,
       viewport: { width: 1440, height: 900 },
+      // Playwright adds --no-sandbox by default. Google may reject login when
+      // the stable browser is launched with this unsupported command-line flag.
+      ignoreDefaultArgs: ["--no-sandbox"],
       ...(this.executablePath ? { executablePath: this.executablePath } : {}),
     };
     const context = await chromium.launchPersistentContext(this.profileDir, launchOptions);
     this.context = context;
-
     if (this.stopping) {
       await context.close();
       this.context = undefined;
       throw new Error("Browser provider stopped during startup");
     }
-
     const pages = context.pages();
     const startupPage = pages[0] ?? await context.newPage();
     this.observePage(startupPage);
     if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(startupPage.url())) {
       await startupPage.goto(CHATGPT_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
     }
-    for (const page of context.pages()) {
-      if (page !== startupPage) this.observePage(page);
-    }
+    for (const page of context.pages()) if (page !== startupPage) this.observePage(page);
   }
 
   private async initializeAgent(agent: ManagedAgent): Promise<void> {
@@ -202,10 +189,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     await composer.fill(text);
     await page.waitForTimeout(300);
     const sendButton = page.locator('button[data-testid="send-button"], button[aria-label*="Send" i], button[type="submit"]').first();
-    if (await sendButton.isVisible().catch(() => false)) {
-      await sendButton.click();
-      return;
-    }
+    if (await sendButton.isVisible().catch(() => false)) { await sendButton.click(); return; }
     await composer.press("Enter");
   }
 
@@ -235,8 +219,8 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
 
   private observePage(page: Page): void {
     page.on("close", () => {
-      for (const agent of this.agents.values()) {
-        if (agent.page === page) this.patch(agent, { status: "tab-closed", lastError: "浏览器页面已关闭" });
+      for (const agent of this.agents.values()) if (agent.page === page) {
+        this.patch(agent, { status: "tab-closed", lastError: "浏览器页面已关闭" });
       }
     });
   }
