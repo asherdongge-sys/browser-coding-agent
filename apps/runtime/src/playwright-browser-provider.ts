@@ -1,5 +1,6 @@
-import { chromium, type BrowserContext, type Page } from "playwright";
+import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import type { BrowserAgent, BrowserAgentEvent, BrowserProvider } from "./browser-provider.js";
+import { ensureChromeWithCdp, type ChromeLaunchHandle } from "./chrome-launcher.js";
 
 const CHATGPT_URL = "https://chatgpt.com/";
 const RESPONSE_TIMEOUT_MS = 120000;
@@ -9,6 +10,8 @@ export type PlaywrightBrowserProviderOptions = {
   profileDir?: string;
   headless?: boolean;
   executablePath?: string;
+  cdpPort?: number;
+  cdpUrl?: string;
   onEvent?: (event: BrowserAgentEvent) => void;
 };
 
@@ -16,19 +19,25 @@ type ManagedAgent = BrowserAgent & { page: Page };
 
 export class PlaywrightBrowserProvider implements BrowserProvider {
   readonly kind = "playwright" as const;
+  private browser: Browser | undefined;
   private context: BrowserContext | undefined;
   private startPromise: Promise<void> | undefined;
+  private chromeHandle: ChromeLaunchHandle | undefined;
   private stopping = false;
   private readonly agents = new Map<string, ManagedAgent>();
   private readonly profileDir: string;
   private readonly headless: boolean;
   private readonly executablePath: string | undefined;
+  private readonly cdpPort: number | undefined;
+  private readonly cdpUrl: string | undefined;
   private readonly onEvent: ((event: BrowserAgentEvent) => void) | undefined;
 
   constructor(options: PlaywrightBrowserProviderOptions = {}) {
-    this.profileDir = options.profileDir ?? process.env.BROWSER_CODING_AGENT_PROFILE ?? ".browser-coding-agent/chromium";
+    this.profileDir = options.profileDir ?? process.env.BROWSER_CODING_AGENT_PROFILE ?? ".browser-coding-agent/chrome-profile";
     this.headless = options.headless ?? process.env.BROWSER_CODING_AGENT_HEADLESS === "1";
     this.executablePath = options.executablePath ?? (process.env.BROWSER_EXECUTABLE?.trim() || undefined);
+    this.cdpPort = options.cdpPort;
+    this.cdpUrl = options.cdpUrl;
     this.onEvent = options.onEvent;
   }
 
@@ -80,41 +89,55 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
 
   async stop(): Promise<void> {
     this.stopping = true;
-    const context = this.context;
-    this.context = undefined;
     this.agents.clear();
-    if (context) {
-      try { await context.close(); }
-      catch (error) { console.error("[BrowserCodingAgent] Playwright context close failed:", error); }
+    this.context = undefined;
+    if (this.browser) {
+      try {
+        // CDP disconnect only: do not close the user's Chrome process or profile.
+        this.browser.disconnect();
+      } catch (error) {
+        console.error("[BrowserCodingAgent] Chrome CDP disconnect failed:", error);
+      }
     }
+    this.browser = undefined;
+    this.chromeHandle = undefined;
     if (this.startPromise) {
       try { await this.startPromise; } catch { /* startup failure already reported */ }
     }
   }
 
   private async startInternal(): Promise<void> {
-    const launchOptions = {
-      headless: this.headless,
-      viewport: { width: 1440, height: 900 },
-      // Playwright adds --no-sandbox by default. Google may reject login when
-      // the stable browser is launched with this unsupported command-line flag.
-      ignoreDefaultArgs: ["--no-sandbox"],
-      ...(this.executablePath ? { executablePath: this.executablePath } : {}),
-    };
-    const context = await chromium.launchPersistentContext(this.profileDir, launchOptions);
-    this.context = context;
-    if (this.stopping) {
-      await context.close();
-      this.context = undefined;
-      throw new Error("Browser provider stopped during startup");
+    if (this.headless) {
+      console.warn("[BrowserCodingAgent] BROWSER_CODING_AGENT_HEADLESS=1 is ignored for the Chrome CDP provider; a visible Chrome session is required for first-time login.");
     }
+
+    this.chromeHandle = await ensureChromeWithCdp({
+      executablePath: this.executablePath,
+      profileDir: this.profileDir,
+      cdpPort: this.cdpPort,
+      cdpUrl: this.cdpUrl,
+      url: CHATGPT_URL,
+    });
+
+    const browser = await chromium.connectOverCDP(this.chromeHandle.endpoint);
+    this.browser = browser;
+    const contexts = browser.contexts();
+    const context = contexts[0];
+    if (!context) {
+      browser.disconnect();
+      this.browser = undefined;
+      throw new Error("Connected to Chrome over CDP, but no browser context is available");
+    }
+    this.context = context;
+
     const pages = context.pages();
-    const startupPage = pages[0] ?? await context.newPage();
+    const chatPage = pages.find((page) => /^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(page.url()));
+    const startupPage = chatPage ?? pages[0] ?? await context.newPage();
     this.observePage(startupPage);
     if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(startupPage.url())) {
       await startupPage.goto(CHATGPT_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
     }
-    for (const page of context.pages()) if (page !== startupPage) this.observePage(page);
+    for (const page of context.pages()) this.observePage(page);
   }
 
   private async initializeAgent(agent: ManagedAgent): Promise<void> {
@@ -127,7 +150,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
       }
       await this.waitForComposerOrLogin(agent.page, 30000);
       if (!await this.isAuthenticated(agent.page)) {
-        this.patch(agent, { status: "login-required", lastError: "请在托管的 Chromium 中完成 ChatGPT 登录，然后点击继续。" });
+        this.patch(agent, { status: "login-required", lastError: "请在托管的 Chrome 中完成 ChatGPT 登录，然后点击继续。" });
         return;
       }
       this.patch(agent, { status: "idle", conversationUrl: agent.page.url(), lastError: "" });
