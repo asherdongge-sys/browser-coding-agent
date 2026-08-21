@@ -12,7 +12,6 @@
     button { border:0; border-radius:8px; padding:10px 12px; cursor:pointer; font-weight:600; }
     #run { background:#111; color:#fff; width:100%; margin-top:8px; }
     #bridge-test { background:#e5e7eb; color:#111; width:100%; margin-top:8px; }
-    #agent-dashboard { background:#2563eb; color:#fff; width:100%; margin-top:8px; }
     button:disabled { opacity:.5; cursor:not-allowed; } .event { padding:7px 0; border-bottom:1px solid #eee; font-size:12px; } .event:last-child{border-bottom:0}
     .state { display:inline-block; padding:3px 7px; border-radius:999px; background:#eef2ff; font-size:11px; }
     #diagnostic { margin-top:8px; white-space:pre-wrap; font:12px ui-monospace,monospace; color:#374151; }
@@ -21,11 +20,6 @@
 <body>
   <h1>Browser Coding Agent</h1>
   <div class="muted" id="connection">Runtime 按需连接；启动 Agent 时自动连接</div>
-  <div class="card">
-    <div class="muted">多 Agent 工作台</div>
-    <div class="muted" style="margin-top:5px">一个 ChatGPT 对话对应一个 Agent，支持多个标签页并行运行。</div>
-    <button id="agent-dashboard">打开 Agent 工作台</button>
-  </div>
   <div class="card">
     <div class="muted">工作区路径（本机目录）</div>
     <input id="workspace" placeholder="例如：E:\\web\\browser-coding-agent" autocomplete="off">
