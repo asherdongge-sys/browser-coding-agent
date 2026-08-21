@@ -26,7 +26,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
   constructor(options: PlaywrightBrowserProviderOptions = {}) {
     this.profileDir = options.profileDir ?? process.env.BROWSER_CODING_AGENT_PROFILE ?? ".browser-coding-agent/chromium";
     this.headless = options.headless ?? process.env.BROWSER_CODING_AGENT_HEADLESS === "1";
-    this.executablePath = options.executablePath ?? process.env.BROWSER_EXECUTABLE?.trim() || undefined;
+    this.executablePath = options.executablePath ?? (process.env.BROWSER_EXECUTABLE?.trim() || undefined);
     this.onEvent = options.onEvent;
   }
 
