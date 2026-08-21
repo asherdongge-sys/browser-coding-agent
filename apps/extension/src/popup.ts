@@ -4,6 +4,7 @@ const workspaceInput = document.querySelector<HTMLInputElement>("#workspace")!;
 const goal = document.querySelector<HTMLTextAreaElement>("#goal")!;
 const run = document.querySelector<HTMLButtonElement>("#run")!;
 const bridgeTest = document.querySelector<HTMLButtonElement>("#bridge-test")!;
+const dashboardButton = document.querySelector<HTMLButtonElement>("#agent-dashboard")!;
 const diagnostic = document.querySelector<HTMLDivElement>("#diagnostic")!;
 const events = document.querySelector<HTMLDivElement>("#events")!;
 
@@ -33,13 +34,7 @@ async function runBridgeDiagnostic(): Promise<void> {
     const response = await sendMessage<{ ok?: boolean; error?: string; diagnostic?: { composer: boolean; composerTag: string | null; sendButton: boolean; assistantCount: number; latestAssistantTextLength: number; url: string } }>({ type: "chatgpt.bridge.diagnostic" });
     if (!response.ok || !response.diagnostic) { diagnostic.textContent = `失败：${response.error ?? "没有诊断结果"}`; addEvent(`Bridge 诊断失败：${response.error ?? "unknown error"}`); return; }
     const d = response.diagnostic;
-    diagnostic.textContent = [
-      `Composer: ${d.composer ? "✅" : "❌"} ${d.composerTag ?? ""}`,
-      `Send button: ${d.sendButton ? "✅" : "❌"}`,
-      `Assistant count: ${d.assistantCount}`,
-      `Latest assistant text: ${d.latestAssistantTextLength} chars`,
-      `URL: ${d.url}`,
-    ].join("\n");
+    diagnostic.textContent = [`Composer: ${d.composer ? "✅" : "❌"} ${d.composerTag ?? ""}`, `Send button: ${d.sendButton ? "✅" : "❌"}`, `Assistant count: ${d.assistantCount}`, `Latest assistant text: ${d.latestAssistantTextLength} chars`, `URL: ${d.url}`].join("\n");
     addEvent("Bridge DOM 诊断完成");
   } catch (error) { diagnostic.textContent = `失败：${error instanceof Error ? error.message : String(error)}`; addEvent(`Bridge 诊断请求失败：${error instanceof Error ? error.message : String(error)}`); }
   finally { bridgeTest.disabled = false; }
@@ -86,6 +81,7 @@ chrome.storage.local.get(["workspacePath"], (result) => { if (typeof result.work
 workspaceInput.addEventListener("change", () => { void chrome.storage.local.set({ workspacePath: workspaceInput.value.trim() }); });
 run.addEventListener("click", () => { void startAgent(); });
 bridgeTest.addEventListener("click", () => { void runBridgeTest(); });
+dashboardButton.addEventListener("click", () => { void sendMessage({ type: "agent.dashboard.open" }); });
 goal.addEventListener("keydown", (event) => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter") void startAgent(); });
 updateConnection();
 
