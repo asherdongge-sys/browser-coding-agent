@@ -24,6 +24,8 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
   const sessionAllowed = new Set<string>();
   const providerKind = process.env.BROWSER_PROVIDER === "playwright" ? "playwright" : "extension";
   let browserProvider: BrowserProvider | undefined;
+  let browserStartup: Promise<void> | undefined;
+  let shuttingDown = false;
   for (const tool of [...createFilesystemTools(workspace), ...createTerminalTools(workspace)]) tools.register(tool);
 
   const broadcast = (message: unknown, role?: "extension" | "dashboard"): void => { const payload = JSON.stringify(message); for (const client of clients) if (!role || roles.get(client) === role) safeSend(client, payload); };
@@ -32,7 +34,7 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
 
   if (providerKind === "playwright") {
     browserProvider = new PlaywrightBrowserProvider({ onEvent: emitBrowserEvent });
-    void browserProvider.start().catch((error) => console.error("[BrowserCodingAgent] Playwright startup failed:", error));
+    browserStartup = browserProvider.start().catch((error) => console.error("[BrowserCodingAgent] Playwright startup failed:", error));
   }
 
   const executeTool = <TArguments = unknown, TResult = unknown>(call: ToolCall<TArguments>, requester?: WebSocket, requestId?: string | number): Promise<ToolResult<TResult>> => {
@@ -96,7 +98,56 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
     });
     socket.on("close", () => { clients.delete(socket); roles.delete(socket); for (const [id, requester] of forwarded) if (requester === socket) forwarded.delete(id); });
   });
-  return { httpServer, wsServer, port };
+
+  const closeHttpServer = (): Promise<void> => new Promise((resolve, reject) => {
+    if (!httpServer.listening) { resolve(); return; }
+    httpServer.close((error) => error ? reject(error) : resolve());
+  });
+
+  const shutdown = async (signal: string): Promise<void> => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[BrowserCodingAgent] Received ${signal}, shutting down...`);
+
+    for (const socket of clients) {
+      try { socket.close(1001, "Runtime shutting down"); } catch { /* already closed */ }
+    }
+
+    try {
+      wsServer.close();
+    } catch { /* already closed */ }
+
+    try {
+      await closeHttpServer();
+    } catch (error) {
+      console.error("[BrowserCodingAgent] HTTP server shutdown failed:", error);
+    }
+
+    if (browserStartup) {
+      try { await browserStartup; } catch { /* startup failure already logged */ }
+    }
+
+    if (browserProvider) {
+      try {
+        await browserProvider.stop();
+      } catch (error) {
+        console.error("[BrowserCodingAgent] Browser provider shutdown failed:", error);
+      }
+    }
+
+    pending.clear();
+    forwarded.clear();
+    clients.clear();
+    roles.clear();
+    console.log("[BrowserCodingAgent] Shutdown complete");
+  };
+
+  const installSignalHandlers = (): void => {
+    process.once("SIGINT", () => { void shutdown("SIGINT"); });
+    process.once("SIGTERM", () => { void shutdown("SIGTERM"); });
+  };
+
+  return { httpServer, wsServer, port, shutdown, installSignalHandlers };
 }
 function safeSend(socket: WebSocket, message: unknown): void { try { socket.send(typeof message === "string" ? message : JSON.stringify(message)); } catch { /* closed client */ } }
 function asRecord(value: unknown): Record<string, any> { if (!value || typeof value !== "object") throw new Error("params must be an object"); return value as Record<string, any>; }
@@ -105,4 +156,5 @@ function asApprovalResponse(value: unknown): ApprovalResponse { const record = a
 function safeWorkspaceRoot(workspace: WorkspaceManager): string | null { try { return workspace.getRoot(); } catch { return null; } }
 function reply(socket: WebSocket, id: string | number | undefined, result?: unknown, error?: { code: number; message: string }): void { safeSend(socket, { jsonrpc: "2.0", id, ...(error ? { error } : { result }) }); }
 const runtime = createRuntimeServer();
+runtime.installSignalHandlers();
 runtime.httpServer.listen(runtime.port, "127.0.0.1", () => console.log(`Browser Coding Agent runtime listening on http://127.0.0.1:${runtime.port}`));
