@@ -14,6 +14,11 @@ type PendingApproval = { socket: WebSocket | undefined; id: string | number | un
 const DASHBOARD_FILE = fileURLToPath(new URL("../web/index.html", import.meta.url));
 const SHUTDOWN_TIMEOUT_MS = 3000;
 
+type WsSocketLike = { terminate(): void; readyState: number; send(data: string): void };
+type WsServerLike = { clients: Set<WsSocketLike>; close(callback?: (error?: Error) => void): void };
+const wsSocket = (socket: WebSocket): WsSocketLike => socket as unknown as WsSocketLike;
+const wsServerLike = (server: WebSocketServer): WsServerLike => server as unknown as WsServerLike;
+
 export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGENT_PORT ?? DEFAULT_PORT)) {
   const workspace = new WorkspaceManager();
   const tools = new ToolRegistry();
@@ -153,7 +158,7 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
   });
 
   const closeHttpServer = (): Promise<void> => new Promise((resolve, reject) => { if (!httpServer.listening) { resolve(); return; } httpServer.close((error) => error ? reject(error) : resolve()); });
-  const closeWebSocketServer = (): Promise<void> => new Promise((resolve) => { try { for (const socket of wsServer.clients) socket.terminate(); wsServer.close(() => resolve()); } catch { resolve(); } });
+  const closeWebSocketServer = (): Promise<void> => new Promise((resolve) => { try { const server = wsServerLike(wsServer); for (const socket of server.clients) { try { socket.terminate(); } catch {} } server.close(() => resolve()); } catch { resolve(); } });
   const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> => { let timer: NodeJS.Timeout | undefined; try { return await Promise.race([promise, new Promise<T>((_, reject) => { timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs); })]); } finally { if (timer) clearTimeout(timer); } };
 
   const shutdown = async (signal: string): Promise<void> => {
@@ -163,7 +168,7 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
     const forceExit = setTimeout(() => { console.error(`[BrowserCodingAgent] Shutdown timed out after ${SHUTDOWN_TIMEOUT_MS}ms; forcing exit`); process.exit(1); }, SHUTDOWN_TIMEOUT_MS);
     forceExit.unref();
     try {
-      for (const socket of clients) { try { socket.terminate(); } catch {} }
+      for (const socket of clients) { try { wsSocket(socket).terminate(); } catch {} }
       clients.clear(); roles.clear(); forwarded.clear();
       try { await withTimeout(closeWebSocketServer(), 1000, "WebSocket server shutdown"); } catch (error) { console.error("[BrowserCodingAgent] WebSocket shutdown failed:", error); }
       try { await withTimeout(closeHttpServer(), 1000, "HTTP server shutdown"); } catch (error) { console.error("[BrowserCodingAgent] HTTP shutdown failed:", error); }
@@ -178,7 +183,7 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
   const installSignalHandlers = (): void => { process.once("SIGINT", () => { void shutdown("SIGINT"); }); process.once("SIGTERM", () => { void shutdown("SIGTERM"); }); };
   return { httpServer, wsServer, port, shutdown, installSignalHandlers };
 }
-function safeSend(socket: WebSocket, message: unknown): void { try { if (socket.readyState === WebSocket.OPEN) socket.send(typeof message === "string" ? message : JSON.stringify(message)); } catch {} }
+function safeSend(socket: WebSocket, message: unknown): void { try { const target = wsSocket(socket); if (target.readyState === 1) target.send(typeof message === "string" ? message : JSON.stringify(message)); } catch {} }
 function asRecord(value: unknown): Record<string, any> { if (!value || typeof value !== "object") throw new Error("params must be an object"); return value as Record<string, any>; }
 function requiredString(value: unknown, name: string): string { if (typeof value !== "string" || !value.trim()) throw new Error(`${name} must be a non-empty string`); return value; }
 function asApprovalResponse(value: unknown): ApprovalResponse { const record = asRecord(value); const requestId = requiredString(record.requestId, "requestId"); const decision = record.decision; if (decision !== "allow_once" && decision !== "allow_session" && decision !== "deny") throw new Error("Invalid approval decision"); return { requestId, decision }; }
