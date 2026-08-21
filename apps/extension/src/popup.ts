@@ -4,7 +4,6 @@ const workspaceInput = document.querySelector<HTMLInputElement>("#workspace")!;
 const goal = document.querySelector<HTMLTextAreaElement>("#goal")!;
 const run = document.querySelector<HTMLButtonElement>("#run")!;
 const bridgeTest = document.querySelector<HTMLButtonElement>("#bridge-test")!;
-const dashboardButton = document.querySelector<HTMLButtonElement>("#agent-dashboard")!;
 const diagnostic = document.querySelector<HTMLDivElement>("#diagnostic")!;
 const events = document.querySelector<HTMLDivElement>("#events")!;
 
@@ -87,7 +86,6 @@ chrome.storage.local.get(["workspacePath"], (result) => { if (typeof result.work
 workspaceInput.addEventListener("change", () => { void chrome.storage.local.set({ workspacePath: workspaceInput.value.trim() }); });
 run.addEventListener("click", () => { void startAgent(); });
 bridgeTest.addEventListener("click", () => { void runBridgeTest(); });
-dashboardButton.addEventListener("click", () => { void sendMessage({ type: "agent.dashboard.open" }); });
 goal.addEventListener("keydown", (event) => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter") void startAgent(); });
 updateConnection();
 
