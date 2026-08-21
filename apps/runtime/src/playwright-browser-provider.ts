@@ -32,7 +32,6 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     this.context = await chromium.launchPersistentContext(this.profileDir, {
       headless: this.headless,
       viewport: { width: 1440, height: 900 },
-      userAgent: process.env.BROWSER_CODING_AGENT_USER_AGENT,
     });
     for (const page of this.context.pages()) this.observePage(page);
   }
@@ -54,6 +53,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
       page,
     };
     this.agents.set(agent.id, agent);
+    this.observePage(page);
     this.emit({ type: "agent.created", agent: this.publicAgent(agent) });
     void this.initializeAgent(agent);
     return this.publicAgent(agent);
@@ -81,7 +81,9 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
 
   private async initializeAgent(agent: ManagedAgent): Promise<void> {
     try {
-      await agent.page.goto(CHATGPT_URL, { waitUntil: "domcontentloaded" });
+      if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(agent.page.url())) {
+        await agent.page.goto(CHATGPT_URL, { waitUntil: "domcontentloaded" });
+      }
       await this.waitForComposerOrLogin(agent.page, 30000);
       if (!await this.isAuthenticated(agent.page)) {
         this.patch(agent, { status: "login-required", lastError: "请在托管的 Chromium 中完成 ChatGPT 登录，然后点击继续。" });
@@ -140,12 +142,12 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
   }
 
   private async fillComposer(page: Page, text: string): Promise<void> {
-    const composer = page.locator("[contenteditable='true'], textarea, [role='textbox']").filter({ visible: true }).first();
+    const composer = page.locator("[contenteditable='true'], textarea, [role='textbox']").first();
     await composer.waitFor({ state: "visible", timeout: 15000 });
     await composer.fill(text);
     await page.waitForTimeout(300);
-    const sendButton = page.locator('button[data-testid="send-button"], button[aria-label*="Send" i], button[type="submit"]').filter({ visible: true }).first();
-    if (await sendButton.count()) {
+    const sendButton = page.locator('button[data-testid="send-button"], button[aria-label*="Send" i], button[type="submit"]').first();
+    if (await sendButton.isVisible().catch(() => false)) {
       await sendButton.click();
       return;
     }
