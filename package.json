@@ -9,7 +9,7 @@
     "typecheck": "pnpm build && pnpm -r typecheck",
     "test": "pnpm -r --if-present test",
     "lint": "pnpm -r --if-present lint",
-    "dev:runtime": "pnpm --filter @browser-coding-agent/runtime dev",
+    "dev:runtime": "tsx apps/runtime/src/server.ts",
     "build:extension": "pnpm --filter @browser-coding-agent/extension build"
   },
   "devDependencies": {
