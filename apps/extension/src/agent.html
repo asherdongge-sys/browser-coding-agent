@@ -23,7 +23,8 @@
     .main { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; min-width: 0; }
     .topbar { padding: 18px 22px; border-bottom: 1px solid #252a35; display: flex; align-items: center; justify-content: space-between; gap: 14px; }
     .title { font-size: 18px; font-weight: 800; }
-    .status { font-size: 12px; color: #9da7b8; }
+    .status { font-size: 12px; color: #9da7b8; max-width: 760px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .top-actions { display: flex; gap: 8px; flex-shrink: 0; }
     .messages { padding: 24px; overflow: auto; display: flex; flex-direction: column; gap: 14px; }
     .empty { margin: auto; max-width: 520px; text-align: center; color: #8993a5; }
     .message { max-width: 820px; width: fit-content; padding: 12px 14px; border-radius: 12px; white-space: pre-wrap; line-height: 1.55; }
@@ -37,11 +38,12 @@
     textarea:focus, input:focus { border-color: #4b7bd8; }
     .send { min-width: 88px; border: 0; border-radius: 10px; background: #2f6feb; color: white; font-weight: 700; }
     .send:disabled, .new-agent:disabled { opacity: .5; cursor: default; }
+    .secondary { border: 1px solid #303746; border-radius: 9px; background: transparent; color: #c8cfdb; padding: 9px 12px; }
+    .primary { border: 0; border-radius: 9px; background: #2f6feb; color: white; padding: 9px 12px; }
     .modal-backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / .55); display: grid; place-items: center; }
     .modal { width: min(520px, calc(100vw - 30px)); background: #151922; border: 1px solid #303746; border-radius: 14px; padding: 18px; box-shadow: 0 24px 70px rgb(0 0 0 / .45); }
     .modal h2 { margin: 0 0 14px; font-size: 17px; }
     .modal-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 14px; }
-    .secondary { border: 1px solid #303746; border-radius: 9px; background: transparent; color: #c8cfdb; padding: 9px 12px; }
     .hidden { display: none; }
   </style>
 </head>
@@ -59,7 +61,10 @@
           <div id="title" class="title">选择一个 Agent</div>
           <div id="status" class="status">首次使用时会打开 ChatGPT 标签页进行登录。</div>
         </div>
-        <button id="open-chatgpt" class="secondary">打开 ChatGPT</button>
+        <div class="top-actions">
+          <button id="resume" class="primary hidden">登录后继续</button>
+          <button id="open-chatgpt" class="secondary">打开 ChatGPT</button>
+        </div>
       </header>
       <section id="messages" class="messages">
         <div class="empty">新建 Agent 后输入任务。Agent 会自动打开独立的 ChatGPT 对话，并在同一对话中持续多轮交流。</div>
