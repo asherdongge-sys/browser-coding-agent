@@ -14,6 +14,7 @@
     "@browser-coding-agent/permissions": "workspace:*",
     "@browser-coding-agent/protocol": "workspace:*",
     "@browser-coding-agent/tools": "workspace:*",
+    "playwright": "^1.55.0",
     "ws": "^8.18.3"
   },
   "devDependencies": {
