@@ -91,16 +91,12 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     this.stopping = true;
     this.agents.clear();
     this.context = undefined;
-    if (this.browser) {
-      try {
-        // CDP disconnect only: do not close the user's Chrome process or profile.
-        this.browser.disconnect();
-      } catch (error) {
-        console.error("[BrowserCodingAgent] Chrome CDP disconnect failed:", error);
-      }
-    }
+    // Playwright's Browser type has no disconnect() method. This provider uses
+    // connectOverCDP and intentionally must not close the user's Chrome.
+    // Dropping the references lets the runtime exit without touching Chrome.
     this.browser = undefined;
     this.chromeHandle = undefined;
+
     if (this.startPromise) {
       try { await this.startPromise; } catch { /* startup failure already reported */ }
     }
@@ -111,20 +107,20 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
       console.warn("[BrowserCodingAgent] BROWSER_CODING_AGENT_HEADLESS=1 is ignored for the Chrome CDP provider; a visible Chrome session is required for first-time login.");
     }
 
-    this.chromeHandle = await ensureChromeWithCdp({
-      executablePath: this.executablePath,
+    const launcherOptions = {
       profileDir: this.profileDir,
       cdpPort: this.cdpPort,
       cdpUrl: this.cdpUrl,
       url: CHATGPT_URL,
-    });
+      ...(this.executablePath ? { executablePath: this.executablePath } : {}),
+    };
 
+    this.chromeHandle = await ensureChromeWithCdp(launcherOptions);
     const browser = await chromium.connectOverCDP(this.chromeHandle.endpoint);
     this.browser = browser;
-    const contexts = browser.contexts();
-    const context = contexts[0];
+
+    const context = browser.contexts()[0];
     if (!context) {
-      browser.disconnect();
       this.browser = undefined;
       throw new Error("Connected to Chrome over CDP, but no browser context is available");
     }
