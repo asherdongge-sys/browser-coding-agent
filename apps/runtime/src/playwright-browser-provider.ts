@@ -91,9 +91,6 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     this.stopping = true;
     this.agents.clear();
     this.context = undefined;
-    // Playwright's Browser type has no disconnect() method. This provider uses
-    // connectOverCDP and intentionally must not close the user's Chrome.
-    // Dropping the references lets the runtime exit without touching Chrome.
     this.browser = undefined;
     this.chromeHandle = undefined;
 
@@ -107,9 +104,10 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
       console.warn("[BrowserCodingAgent] BROWSER_CODING_AGENT_HEADLESS=1 is ignored for the Chrome CDP provider; a visible Chrome session is required for first-time login.");
     }
 
+    const cdpPort = this.cdpPort ?? Number(process.env.BROWSER_CDP_PORT ?? 9222);
     const launcherOptions = {
       profileDir: this.profileDir,
-      cdpPort: this.cdpPort,
+      cdpPort,
       cdpUrl: this.cdpUrl,
       url: CHATGPT_URL,
       ...(this.executablePath ? { executablePath: this.executablePath } : {}),
