@@ -14,7 +14,7 @@ type BridgeSnapshot = {
   url: string;
 };
 
-const RESPONSE_TIMEOUT_MS = 120000;
+const AGENT_RESPONSE_TIMEOUT_MS = 120000;
 let busy = false;
 
 function emit(event: AgentEvent): void {
@@ -121,7 +121,7 @@ async function waitForAssistant(previousNode: HTMLElement | null, previousText: 
   const started = Date.now();
   let lastText = "";
   let stableSince = 0;
-  while (Date.now() - started < RESPONSE_TIMEOUT_MS) {
+  while (Date.now() - started < AGENT_RESPONSE_TIMEOUT_MS) {
     const current = assistantMessages().at(-1);
     if (current) {
       const changed = current.node !== previousNode || current.text.length > previousText.length;
