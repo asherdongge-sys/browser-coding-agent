@@ -12,6 +12,7 @@ import { PlaywrightBrowserProvider } from "./playwright-browser-provider.js";
 export const DEFAULT_PORT = 4317;
 type PendingApproval = { socket: WebSocket | undefined; id: string | number | undefined; call: ToolCall; toolName: string; resolve: (result: ToolResult<unknown>) => void };
 const DASHBOARD_FILE = fileURLToPath(new URL("../web/index.html", import.meta.url));
+const SHUTDOWN_TIMEOUT_MS = 3000;
 
 export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGENT_PORT ?? DEFAULT_PORT)) {
   const workspace = new WorkspaceManager();
@@ -53,6 +54,7 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
   };
 
   const httpServer = createServer(async (request, response) => {
+    if (shuttingDown) { response.writeHead(503, { "content-type": "application/json" }); response.end(JSON.stringify({ ok: false, error: "Runtime is shutting down" })); return; }
     if (request.url === "/" || request.url === "/index.html") { try { const html = await readFile(DASHBOARD_FILE, "utf8"); response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }); response.end(html); } catch (error) { response.writeHead(500, { "content-type": "text/plain; charset=utf-8" }); response.end(error instanceof Error ? error.message : String(error)); } return; }
     response.writeHead(200, { "content-type": "application/json" }); response.end(JSON.stringify({ name: "browser-coding-agent", protocol: "0.1", workspace: safeWorkspaceRoot(workspace), clients: clients.size, dashboards: [...roles.values()].filter((role) => role === "dashboard").length, extensions: [...roles.values()].filter((role) => role === "extension").length, browserProvider: providerKind, planner: "chatgpt-browser" }));
   });
@@ -66,23 +68,12 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
       if ("id" in message && !((message as any).method) && forwarded.has(String(message.id))) { const requester = forwarded.get(String(message.id)); forwarded.delete(String(message.id)); if (requester) safeSend(requester, JSON.stringify(message)); return; }
       if ("method" in message && message.method === "runtime.hello" && "id" in message) { const role = asRecord(message.params).role; roles.set(socket, role === "extension" ? "extension" : "dashboard"); reply(socket, message.id, { ok: true, role: roles.get(socket), browserProvider: providerKind }); return; }
       if ("method" in message && message.method === "dashboard.event") { broadcast(message, "dashboard"); return; }
-
       if ("method" in message && (message.method === "agent.list" || message.method === "agent.create" || message.method === "agent.send" || message.method === "agent.resume")) {
-        if (browserProvider) {
-          try {
-            const params = asRecord(message.params);
-            if (message.method === "agent.list") { reply(socket, message.id, { agents: await browserProvider.listAgents() }); return; }
-            if (message.method === "agent.create") { reply(socket, message.id, { agent: await browserProvider.createAgent(typeof params.title === "string" ? params.title : "", typeof params.prompt === "string" ? params.prompt : "") }); return; }
-            if (message.method === "agent.send") { await browserProvider.sendMessage(requiredString(params.agentId, "agentId"), requiredString(params.text, "text")); reply(socket, message.id, { ok: true }); return; }
-            if (message.method === "agent.resume") { reply(socket, message.id, { ok: true, agent: await browserProvider.resumeAgent(requiredString(params.agentId, "agentId")) }); return; }
-          } catch (error) { reply(socket, message.id, undefined, { code: -32000, message: error instanceof Error ? error.message : String(error) }); return; }
-        }
+        if (browserProvider) { try { const params = asRecord(message.params); if (message.method === "agent.list") { reply(socket, message.id, { agents: await browserProvider.listAgents() }); return; } if (message.method === "agent.create") { reply(socket, message.id, { agent: await browserProvider.createAgent(typeof params.title === "string" ? params.title : "", typeof params.prompt === "string" ? params.prompt : "") }); return; } if (message.method === "agent.send") { await browserProvider.sendMessage(requiredString(params.agentId, "agentId"), requiredString(params.text, "text")); reply(socket, message.id, { ok: true }); return; } if (message.method === "agent.resume") { reply(socket, message.id, { ok: true, agent: await browserProvider.resumeAgent(requiredString(params.agentId, "agentId")) }); return; } } catch (error) { reply(socket, message.id, undefined, { code: -32000, message: error instanceof Error ? error.message : String(error) }); return; } }
         const extension = [...clients].find((client) => roles.get(client) === "extension");
         if (!extension) { reply(socket, "id" in message ? message.id : "missing", undefined, { code: -32010, message: "Browser extension is not connected" }); return; }
-        const id = "id" in message ? message.id : crypto.randomUUID(); forwarded.set(String(id), socket);
-        const params = asRecord(message.params); safeSend(extension, { jsonrpc: "2.0", id, method: "dashboard.request", params: { ...params, method: message.method.slice("agent.".length) } }); return;
+        const id = "id" in message ? message.id : crypto.randomUUID(); forwarded.set(String(id), socket); const params = asRecord(message.params); safeSend(extension, { jsonrpc: "2.0", id, method: "dashboard.request", params: { ...params, method: message.method.slice("agent.".length) } }); return;
       }
-
       if ("method" in message && message.method === "approval.respond" && "id" in message) { let approval: ApprovalResponse; try { approval = asApprovalResponse(message.params); } catch (error) { reply(socket, message.id, undefined, { code: -32602, message: error instanceof Error ? error.message : String(error) }); return; } const request = pending.get(approval.requestId); if (!request) { reply(socket, message.id, undefined, { code: -32004, message: "Approval request not found or already resolved" }); return; } pending.delete(approval.requestId); if (approval.decision === "deny") request.resolve({ ok: false, error: "Permission denied by user" }); else { if (approval.decision === "allow_session") sessionAllowed.add(request.toolName); const tool = tools.get(request.toolName); if (!tool) request.resolve({ ok: false, error: "Tool no longer available" }); else { try { request.resolve(await tool.execute(request.call.arguments)); } catch (error) { request.resolve({ ok: false, error: error instanceof Error ? error.message : String(error) }); } } } reply(socket, message.id, { ok: true }); return; }
       if (!("method" in message) || !("id" in message)) return;
       const id = message.id;
@@ -99,57 +90,33 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
     socket.on("close", () => { clients.delete(socket); roles.delete(socket); for (const [id, requester] of forwarded) if (requester === socket) forwarded.delete(id); });
   });
 
-  const closeHttpServer = (): Promise<void> => new Promise((resolve, reject) => {
-    if (!httpServer.listening) { resolve(); return; }
-    httpServer.close((error) => error ? reject(error) : resolve());
-  });
+  const closeHttpServer = (): Promise<void> => new Promise((resolve, reject) => { if (!httpServer.listening) { resolve(); return; } httpServer.close((error) => error ? reject(error) : resolve()); });
+  const closeWebSocketServer = (): Promise<void> => new Promise((resolve) => { try { for (const socket of wsServer.clients) socket.terminate(); wsServer.close(() => resolve()); } catch { resolve(); } });
+  const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> => { let timer: NodeJS.Timeout | undefined; try { return await Promise.race([promise, new Promise<T>((_, reject) => { timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs); })]); } finally { if (timer) clearTimeout(timer); } };
 
   const shutdown = async (signal: string): Promise<void> => {
-    if (shuttingDown) return;
+    if (shuttingDown) { console.warn(`[BrowserCodingAgent] Shutdown already in progress; ignoring ${signal}`); return; }
     shuttingDown = true;
     console.log(`[BrowserCodingAgent] Received ${signal}, shutting down...`);
-
-    for (const socket of clients) {
-      try { socket.close(1001, "Runtime shutting down"); } catch { /* already closed */ }
-    }
-
+    const forceExit = setTimeout(() => { console.error(`[BrowserCodingAgent] Shutdown timed out after ${SHUTDOWN_TIMEOUT_MS}ms; forcing exit`); process.exit(1); }, SHUTDOWN_TIMEOUT_MS);
+    forceExit.unref();
     try {
-      wsServer.close();
-    } catch { /* already closed */ }
-
-    try {
-      await closeHttpServer();
-    } catch (error) {
-      console.error("[BrowserCodingAgent] HTTP server shutdown failed:", error);
-    }
-
-    if (browserStartup) {
-      try { await browserStartup; } catch { /* startup failure already logged */ }
-    }
-
-    if (browserProvider) {
-      try {
-        await browserProvider.stop();
-      } catch (error) {
-        console.error("[BrowserCodingAgent] Browser provider shutdown failed:", error);
-      }
-    }
-
-    pending.clear();
-    forwarded.clear();
-    clients.clear();
-    roles.clear();
-    console.log("[BrowserCodingAgent] Shutdown complete");
+      for (const socket of clients) { try { socket.terminate(); } catch {} }
+      clients.clear(); roles.clear(); forwarded.clear();
+      try { await withTimeout(closeWebSocketServer(), 1000, "WebSocket server shutdown"); } catch (error) { console.error("[BrowserCodingAgent] WebSocket shutdown failed:", error); }
+      try { await withTimeout(closeHttpServer(), 1000, "HTTP server shutdown"); } catch (error) { console.error("[BrowserCodingAgent] HTTP shutdown failed:", error); }
+      if (browserProvider) { try { await withTimeout(browserProvider.stop(), 2000, "Browser provider shutdown"); } catch (error) { console.error("[BrowserCodingAgent] Browser provider shutdown failed:", error); } }
+      if (browserStartup) { try { await withTimeout(browserStartup, 1000, "Browser startup cancellation"); } catch {} }
+      for (const request of pending.values()) request.resolve({ ok: false, error: "Runtime shutting down" });
+      pending.clear(); sessionAllowed.clear();
+      console.log("[BrowserCodingAgent] Shutdown complete");
+    } finally { clearTimeout(forceExit); process.exit(0); }
   };
 
-  const installSignalHandlers = (): void => {
-    process.once("SIGINT", () => { void shutdown("SIGINT"); });
-    process.once("SIGTERM", () => { void shutdown("SIGTERM"); });
-  };
-
+  const installSignalHandlers = (): void => { process.once("SIGINT", () => { void shutdown("SIGINT"); }); process.once("SIGTERM", () => { void shutdown("SIGTERM"); }); };
   return { httpServer, wsServer, port, shutdown, installSignalHandlers };
 }
-function safeSend(socket: WebSocket, message: unknown): void { try { socket.send(typeof message === "string" ? message : JSON.stringify(message)); } catch { /* closed client */ } }
+function safeSend(socket: WebSocket, message: unknown): void { try { if (socket.readyState === 1) socket.send(typeof message === "string" ? message : JSON.stringify(message)); } catch {} }
 function asRecord(value: unknown): Record<string, any> { if (!value || typeof value !== "object") throw new Error("params must be an object"); return value as Record<string, any>; }
 function requiredString(value: unknown, name: string): string { if (typeof value !== "string" || !value.trim()) throw new Error(`${name} must be a non-empty string`); return value; }
 function asApprovalResponse(value: unknown): ApprovalResponse { const record = asRecord(value); const requestId = requiredString(record.requestId, "requestId"); const decision = record.decision; if (decision !== "allow_once" && decision !== "allow_session" && decision !== "deny") throw new Error("Invalid approval decision"); return { requestId, decision }; }
