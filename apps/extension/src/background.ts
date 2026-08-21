@@ -35,10 +35,20 @@ async function updateAgent(id: string, patch: Partial<AgentRecord>): Promise<Age
   const agents = await getAgents();
   const index = agents.findIndex((agent) => agent.id === id);
   if (index < 0) return undefined;
-  agents[index] = { ...agents[index], ...patch, updatedAt: Date.now() };
+
+  const current = agents[index];
+  if (!current) return undefined;
+
+  const updated: AgentRecord = {
+    ...current,
+    ...patch,
+    updatedAt: Date.now(),
+  };
+  agents[index] = updated;
+
   await saveAgents(agents);
-  broadcast({ type: "agent.updated", agent: agents[index] });
-  return agents[index];
+  broadcast({ type: "agent.updated", agent: updated });
+  return updated;
 }
 
 async function openApprovalWindow(): Promise<void> {
@@ -276,9 +286,9 @@ async function getActiveChatGptTab(): Promise<number> {
   const tab = tabs[0];
   if (!tab?.id) throw new Error("No active tab");
   const url = tab.url ?? "";
-  if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(url)) throw new Error("Open a ChatGPT tab first");
+  if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(url)) throw new Error("Active tab is not ChatGPT");
   await ensureChatGptBridge(tab.id);
   return tab.id;
 }
 
-export {};
+connectRuntime();
