@@ -1,0 +1,22 @@
+{
+  "name": "@browser-coding-agent/runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsx src/server.ts",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@browser-coding-agent/agent-core": "workspace:*",
+    "@browser-coding-agent/permissions": "workspace:*",
+    "@browser-coding-agent/protocol": "workspace:*",
+    "@browser-coding-agent/tools": "workspace:*",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.1"
+  }
+}

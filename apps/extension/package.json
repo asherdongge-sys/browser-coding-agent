@@ -1,0 +1,16 @@
+{
+  "name": "@browser-coding-agent/extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/copy-manifest.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@browser-coding-agent/protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.324"
+  }
+}

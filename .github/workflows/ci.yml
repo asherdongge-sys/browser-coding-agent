@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "feat/**"]
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --no-frozen-lockfile
+      - run: pnpm build
+      - run: pnpm typecheck
+      - name: Runtime smoke test
+        shell: bash
+        run: |
+          pnpm --filter @browser-coding-agent/runtime dev > /tmp/browser-coding-agent-runtime.log 2>&1 &
+          PID=$!
+          trap 'kill $PID 2>/dev/null || true' EXIT
+          for i in {1..20}; do
+            if curl --fail --silent http://127.0.0.1:4317/ > /tmp/runtime-health.json; then
+              break
+            fi
+            sleep 1
+          done
+          cat /tmp/runtime-health.json
+          pnpm --filter @browser-coding-agent/runtime exec node scripts/smoke.mjs
+          cat /tmp/browser-coding-agent-runtime.log
