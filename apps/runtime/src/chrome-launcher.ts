@@ -58,7 +58,7 @@ export async function resolveChromeExecutable(explicit?: string): Promise<string
   if (platform() === "darwin") {
     const found = await firstExisting([
       "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-      join(homedir(), "Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+      join(homedir(), "Applications", "Google Chrome.app", "Contents", "MacOS", "Google Chrome"),
       "/Applications/Chromium.app/Contents/MacOS/Chromium",
     ]);
     if (found) return found;
@@ -79,7 +79,10 @@ export async function resolveChromeExecutable(explicit?: string): Promise<string
 
 async function cdpIsReady(endpoint: string): Promise<boolean> {
   try {
-    const response = await fetch(`${endpoint.replace(/\\/$/, "")}/json/version`, { signal: AbortSignal.timeout(1200) });
+    const base = endpoint.replace(/\/$/, "");
+    const response = await fetch(`${base}/json/version`, {
+      signal: AbortSignal.timeout(1200),
+    });
     return response.ok;
   } catch {
     return false;
@@ -130,9 +133,13 @@ export async function ensureChromeWithCdp(options: ChromeLauncherOptions = {}): 
     if (child.exitCode !== null) {
       throw new Error(`Chrome exited before the DevTools endpoint became ready (code=${child.exitCode})`);
     }
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    await new Promise<void>((resolve) => setTimeout(resolve, 250));
   }
 
-  try { child.kill(); } catch { /* best effort */ }
+  try {
+    child.kill();
+  } catch {
+    // Best effort cleanup.
+  }
   throw new Error(`Timed out waiting for Chrome DevTools at ${endpoint}`);
 }
