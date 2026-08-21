@@ -2,14 +2,14 @@
   "manifest_version": 3,
   "name": "Browser Coding Agent",
   "version": "0.1.0",
-  "description": "A browser-based coding agent with a multi-agent ChatGPT workspace.",
+  "description": "A browser-based coding agent with a local development runtime.",
   "permissions": ["storage", "notifications", "tabs", "scripting"],
   "host_permissions": ["http://127.0.0.1:4317/*", "https://chatgpt.com/*", "https://chat.openai.com/*"],
   "background": { "service_worker": "background.js", "type": "module" },
   "content_scripts": [
     {
       "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
-      "js": ["chatgpt-bridge.js", "agent-bridge.js"],
+      "js": ["chatgpt-bridge.js"],
       "run_at": "document_idle"
     }
   ],
