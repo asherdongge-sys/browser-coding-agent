@@ -1,4 +1,4 @@
-type AgentRecord = {
+type DashboardAgentRecord = {
   id: string;
   title: string;
   prompt?: string;
@@ -28,7 +28,7 @@ const promptInput = document.querySelector<HTMLTextAreaElement>("#agent-prompt-i
 const cancelButton = document.querySelector<HTMLButtonElement>("#cancel")!;
 const createButton = document.querySelector<HTMLButtonElement>("#create")!;
 
-let agents: AgentRecord[] = [];
+let agents: DashboardAgentRecord[] = [];
 let selectedAgentId: string | null = null;
 let messages: Record<string, AgentMessage[]> = {};
 
@@ -47,7 +47,7 @@ function sendMessage<T>(message: unknown): Promise<T> {
 async function load(): Promise<void> {
   const stored = await chrome.storage.local.get(MESSAGES_KEY);
   if (stored[MESSAGES_KEY] && typeof stored[MESSAGES_KEY] === "object") messages = stored[MESSAGES_KEY] as Record<string, AgentMessage[]>;
-  const response = await sendMessage<{ ok?: boolean; agents?: AgentRecord[] }>({ type: "agent.list" });
+  const response = await sendMessage<{ ok?: boolean; agents?: DashboardAgentRecord[] }>({ type: "agent.list" });
   agents = response.agents ?? [];
   renderAgents();
   if (selectedAgentId && agents.some((agent) => agent.id === selectedAgentId)) selectAgent(selectedAgentId);
@@ -56,7 +56,7 @@ async function load(): Promise<void> {
 
 async function persistMessages(): Promise<void> { await chrome.storage.local.set({ [MESSAGES_KEY]: messages }); }
 
-function statusText(agent: AgentRecord): string {
+function statusText(agent: DashboardAgentRecord): string {
   const map: Record<string, string> = {
     "opening-chatgpt": "正在打开 ChatGPT", "login-required": "等待登录", sending: "正在发送", waiting: "等待 ChatGPT",
     idle: "空闲", failed: "失败", "tab-closed": "标签页已关闭",
@@ -109,10 +109,10 @@ function appendMessage(agentId: string, role: "user" | "assistant", text: string
 function showModal(): void { titleInput.value = ""; promptInput.value = ""; modal.classList.remove("hidden"); titleInput.focus(); }
 function hideModal(): void { modal.classList.add("hidden"); }
 
-async function createAgent(): Promise<void> {
+async function createDashboardAgent(): Promise<void> {
   const title = titleInput.value.trim(); const prompt = promptInput.value.trim(); createButton.disabled = true;
   try {
-    const response = await sendMessage<{ ok?: boolean; error?: string; agent?: AgentRecord }>({ type: "agent.create", title, prompt });
+    const response = await sendMessage<{ ok?: boolean; error?: string; agent?: DashboardAgentRecord }>({ type: "agent.create", title, prompt });
     if (!response.ok || !response.agent) throw new Error(response.error ?? "创建 Agent 失败");
     const index = agents.findIndex((agent) => agent.id === response.agent!.id);
     if (index >= 0) agents[index] = response.agent; else agents.unshift(response.agent);
@@ -147,7 +147,7 @@ async function sendCurrentMessage(): Promise<void> {
   } finally { sendButton.disabled = false; }
 }
 
-chrome.runtime.onMessage.addListener((message: { type?: string; agent?: AgentRecord; params?: AgentEvent }) => {
+chrome.runtime.onMessage.addListener((message: { type?: string; agent?: DashboardAgentRecord; params?: AgentEvent }) => {
   if (message.type === "agent.created" && message.agent) {
     if (!agents.some((agent) => agent.id === message.agent!.id)) agents.unshift(message.agent);
     renderAgents(); return;
@@ -170,7 +170,7 @@ chrome.runtime.onMessage.addListener((message: { type?: string; agent?: AgentRec
 
 newAgentButton.addEventListener("click", showModal);
 cancelButton.addEventListener("click", hideModal);
-createButton.addEventListener("click", () => { void createAgent(); });
+createButton.addEventListener("click", () => { void createDashboardAgent(); });
 resumeButton.addEventListener("click", () => { void resumeSelectedAgent(); });
 sendButton.addEventListener("click", () => { void sendCurrentMessage(); });
 inputEl.addEventListener("keydown", (event) => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter") { event.preventDefault(); void sendCurrentMessage(); } });
