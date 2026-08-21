@@ -23,7 +23,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
   private readonly profileDir: string;
   private readonly headless: boolean;
   private readonly executablePath: string | undefined;
-  private readonly onEvent?: (event: BrowserAgentEvent) => void;
+  private readonly onEvent: ((event: BrowserAgentEvent) => void) | undefined;
 
   constructor(options: PlaywrightBrowserProviderOptions = {}) {
     this.profileDir = options.profileDir ?? process.env.BROWSER_CODING_AGENT_PROFILE ?? ".browser-coding-agent/chromium";
@@ -52,10 +52,11 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     if (this.stopping || !this.context) throw new Error("Browser provider is not running");
     const page = await this.context.newPage();
     this.observePage(page);
+    const normalizedPrompt = prompt.trim();
     const agent: ManagedAgent = {
       id: crypto.randomUUID(),
       title: title.trim() || `Agent ${new Date().toLocaleTimeString()}`,
-      prompt: prompt.trim() || undefined,
+      ...(normalizedPrompt ? { prompt: normalizedPrompt } : {}),
       status: "opening-chatgpt",
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -118,8 +119,6 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
       throw new Error("Browser provider stopped during startup");
     }
 
-    // A persistent context may start with an about:blank page. Navigate one visible
-    // page immediately so startup itself has a deterministic ChatGPT target.
     const pages = context.pages();
     const startupPage = pages[0] ?? await context.newPage();
     this.observePage(startupPage);
@@ -147,7 +146,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
       this.patch(agent, { status: "idle", conversationUrl: agent.page.url(), lastError: "" });
       if (agent.prompt) {
         const prompt = agent.prompt;
-        agent.prompt = undefined;
+        delete agent.prompt;
         await this.send(agent, prompt);
       }
     } catch (error) {
@@ -253,5 +252,5 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     return publicAgent;
   }
 
-  private emit(event: BrowserAgentEvent): void { this.onEvent?.(event); }
+  private emit(event: BrowserAgentEvent): void { if (this.onEvent) this.onEvent(event); }
 }
