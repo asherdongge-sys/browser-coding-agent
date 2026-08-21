@@ -23,6 +23,44 @@ Chrome Extension / CLI client
                 └── fs.write (approval required)
 ```
 
+## Chrome CDP browser provider
+
+For the ChatGPT Agent dashboard, `BROWSER_PROVIDER=playwright` now uses Playwright only as a CDP client. It does **not** use `launchPersistentContext`, `--remote-debugging-pipe`, `--no-sandbox`, or Playwright's Chromium bundle.
+
+The runtime will:
+
+1. Reuse `BROWSER_CDP_URL` if a Chrome DevTools endpoint is already available.
+2. Otherwise launch the installed Chrome executable with a dedicated user-data directory and `--remote-debugging-port`.
+3. Open `https://chatgpt.com/` in that Chrome session.
+4. Keep the Chrome process/profile alive when the runtime stops; restarting the runtime reconnects over CDP.
+5. Preserve the ChatGPT login session in the dedicated Chrome profile.
+
+Recommended Windows test:
+
+```powershell
+$env:BROWSER_PROVIDER="playwright"
+$env:BROWSER_EXECUTABLE="C:\Program Files\Google\Chrome\Application\chrome.exe"
+$env:BROWSER_CODING_AGENT_PROFILE="E:\web\browser-coding-agent\.browser-coding-agent\chrome-profile"
+pnpm dev:runtime
+```
+
+If Chrome is installed per-user, use:
+
+```powershell
+$env:BROWSER_EXECUTABLE="$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe"
+```
+
+Do **not** point `BROWSER_EXECUTABLE` at `ms-playwright\chromium-*\chrome.exe` for this mode.
+
+For a manually started Chrome instance, set:
+
+```powershell
+$env:BROWSER_CDP_URL="http://127.0.0.1:9222"
+pnpm dev:runtime
+```
+
+The first login should be performed normally in the visible Chrome window. Later runtime restarts reconnect to the same profile without closing Chrome.
+
 ## Quick test
 
 ```bash
