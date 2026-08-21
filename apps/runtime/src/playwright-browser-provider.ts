@@ -38,7 +38,18 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
       ...(this.executablePath ? { executablePath: this.executablePath } : {}),
     };
     this.context = await chromium.launchPersistentContext(this.profileDir, launchOptions);
-    for (const page of this.context.pages()) this.observePage(page);
+
+    // A persistent context may start with an about:blank page. Navigate one visible
+    // page immediately so startup itself has a deterministic ChatGPT target.
+    const pages = this.context.pages();
+    const startupPage = pages[0] ?? await this.context.newPage();
+    this.observePage(startupPage);
+    if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(startupPage.url())) {
+      await startupPage.goto(CHATGPT_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
+    }
+    for (const page of this.context.pages()) {
+      if (page !== startupPage) this.observePage(page);
+    }
   }
 
   async listAgents(): Promise<BrowserAgent[]> {
@@ -48,6 +59,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
   async createAgent(title: string, prompt: string): Promise<BrowserAgent> {
     await this.start();
     const page = await this.context!.newPage();
+    this.observePage(page);
     const agent: ManagedAgent = {
       id: crypto.randomUUID(),
       title: title.trim() || `Agent ${new Date().toLocaleTimeString()}`,
@@ -58,7 +70,6 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
       page,
     };
     this.agents.set(agent.id, agent);
-    this.observePage(page);
     this.emit({ type: "agent.created", agent: this.publicAgent(agent) });
     void this.initializeAgent(agent);
     return this.publicAgent(agent);
@@ -86,8 +97,10 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
 
   private async initializeAgent(agent: ManagedAgent): Promise<void> {
     try {
+      if (agent.page.isClosed()) throw new Error("Agent browser page is closed");
+      this.patch(agent, { status: "opening-chatgpt", lastError: "" });
       if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(agent.page.url())) {
-        await agent.page.goto(CHATGPT_URL, { waitUntil: "domcontentloaded" });
+        await agent.page.goto(CHATGPT_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
       }
       await this.waitForComposerOrLogin(agent.page, 30000);
       if (!await this.isAuthenticated(agent.page)) {
@@ -125,7 +138,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
   private async ensurePageReady(agent: ManagedAgent): Promise<void> {
     if (agent.page.isClosed()) throw new Error("Agent browser page is closed");
     if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(agent.page.url())) {
-      await agent.page.goto(CHATGPT_URL, { waitUntil: "domcontentloaded" });
+      await agent.page.goto(CHATGPT_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
     }
     await this.waitForComposerOrLogin(agent.page, 30000);
   }
