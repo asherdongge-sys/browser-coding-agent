@@ -108,9 +108,9 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     const launcherOptions = {
       profileDir: this.profileDir,
       cdpPort,
-      cdpUrl: this.cdpUrl,
       url: CHATGPT_URL,
       ...(this.executablePath ? { executablePath: this.executablePath } : {}),
+      ...(this.cdpUrl ? { cdpUrl: this.cdpUrl } : {}),
     };
 
     this.chromeHandle = await ensureChromeWithCdp(launcherOptions);
