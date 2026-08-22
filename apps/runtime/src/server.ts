@@ -77,6 +77,9 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
   };
 
   const emitBrowserEvent = (event: BrowserAgentEvent): void => {
+    // Tool calls/results are internal execution traces. Keep them in the runtime
+    // process logs, but never send them into the user-facing dashboard transcript.
+    if (event.type === "agent.tool.call" || event.type === "agent.tool.result") return;
     safeBroadcast({ jsonrpc: "2.0", method: "dashboard.event", params: event }, "dashboard");
   };
 
@@ -281,9 +284,9 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
               safeBroadcast({ jsonrpc: "2.0", method: "dashboard.event", params: { type: "agent.message", agentId, role: "user", text, createdAt: Date.now() } }, "dashboard");
               const toolName = intent === "list" ? "github.list_repositories" : "github.search_repositories";
               const args = intent === "list" ? { page: 1, perPage: 5 } : { query: text, perPage: 10 };
-              safeBroadcast({ jsonrpc: "2.0", method: "dashboard.event", params: { type: "agent.tool.call", agentId, call: { tool: toolName, arguments: args } } }, "dashboard");
+              console.log(`[BrowserCodingAgent] MCP tool call ${toolName}`, args);
               const result = await client.callTool(toolName, args) as any;
-              safeBroadcast({ jsonrpc: "2.0", method: "dashboard.event", params: { type: "agent.tool.result", agentId, call: { tool: toolName, arguments: args }, result: result.structuredContent ?? result.content ?? result } }, "dashboard");
+              console.log(`[BrowserCodingAgent] MCP tool result ${toolName}`, result);
               let answer: string;
               if (intent === "list") {
                 const raw = result.structuredContent ?? result.content ?? [];
