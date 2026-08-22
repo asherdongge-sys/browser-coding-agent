@@ -1,5 +1,11 @@
 export type BrowserProviderKind = "extension" | "playwright";
 
+export type BrowserAgentMessage = {
+  role: "user" | "assistant";
+  text: string;
+  createdAt: number;
+};
+
 export type BrowserAgent = {
   id: string;
   title: string;
@@ -9,12 +15,13 @@ export type BrowserAgent = {
   createdAt: number;
   updatedAt: number;
   lastError?: string;
+  messages?: BrowserAgentMessage[];
 };
 
 export type BrowserAgentEvent =
   | { type: "agent.created"; agent: BrowserAgent }
   | { type: "agent.updated"; agent: BrowserAgent }
-  | { type: "agent.message"; agentId: string; role: "user" | "assistant"; text: string; url?: string }
+  | { type: "agent.message"; agentId: string; role: "user" | "assistant"; text: string; url?: string; createdAt?: number; streaming?: boolean }
   | { type: "agent.state"; agentId: string; state: string; url?: string };
 
 export type BrowserProvider = {
