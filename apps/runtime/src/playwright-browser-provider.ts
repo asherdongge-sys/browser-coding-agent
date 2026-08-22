@@ -85,6 +85,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     if (!goal.trim()) throw new Error("Agent goal must not be empty");
     const initialization = this.initialization.get(agent.id);
     if (initialization) await initialization;
+    if (agent.status === "failed" || agent.status === "login-required") throw new Error(agent.lastError || "Agent initialization is not ready");
     await this.ensurePageReady(agent);
     if (!await this.isAuthenticated(agent.page)) throw new Error("ChatGPT is not logged in");
     const conversationUrl = agent.conversationUrl || agent.page.url();
@@ -168,6 +169,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
   private async send(agent: ManagedAgent, text: string): Promise<void> {
     const initialization = this.initialization.get(agent.id);
     if (initialization) await initialization;
+    if (agent.status === "failed" || agent.status === "login-required") throw new Error(agent.lastError || "Agent initialization is not ready");
     await this.sendNow(agent, text);
   }
 
