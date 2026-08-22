@@ -7,10 +7,13 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dev": "tsx --import ./src/playwright-composer-fix.ts src/server.ts",
-    "start": "node --import ./dist/playwright-composer-fix.js dist/server.js"
+    "start": "node --import ./dist/playwright-composer-fix.js dist/server.js",
+    "dev:mcp": "tsx src/mcp-server.ts",
+    "start:mcp": "node dist/mcp-server.js"
   },
   "dependencies": {
     "@browser-coding-agent/agent-core": "workspace:*",
+    "@browser-coding-agent/mcp": "workspace:*",
     "@browser-coding-agent/permissions": "workspace:*",
     "@browser-coding-agent/protocol": "workspace:*",
     "@browser-coding-agent/tools": "workspace:*",
