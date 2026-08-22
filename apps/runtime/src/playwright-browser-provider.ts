@@ -20,6 +20,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
   private startPromise: Promise<void> | undefined;
   private stopping = false;
   private readonly agents = new Map<string, ManagedAgent>();
+  private readonly initialization = new Map<string, Promise<void>>();
   private readonly profileDir: string;
   private readonly headless: boolean;
   private readonly executablePath: string | undefined;
@@ -52,7 +53,9 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     this.observePage(page);
     this.emit({ type: "agent.created", agent: this.publicAgent(agent) });
     await this.keepDashboardForeground();
-    void this.initializeAgent(agent);
+    const initialization = this.initializeAgent(agent);
+    this.initialization.set(agent.id, initialization);
+    void initialization.finally(() => { if (this.initialization.get(agent.id) === initialization) this.initialization.delete(agent.id); });
     return this.publicAgent(agent);
   }
 
@@ -66,7 +69,13 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
   async resumeAgent(agentId: string): Promise<BrowserAgent> {
     const agent = this.agents.get(agentId);
     if (!agent) throw new Error(`Agent ${agentId} not found`);
-    await this.initializeAgent(agent);
+    const existing = this.initialization.get(agent.id);
+    if (existing) await existing;
+    else {
+      const initialization = this.initializeAgent(agent);
+      this.initialization.set(agent.id, initialization);
+      await initialization.finally(() => { if (this.initialization.get(agent.id) === initialization) this.initialization.delete(agent.id); });
+    }
     return this.publicAgent(agent);
   }
 
@@ -74,6 +83,8 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     const agent = this.agents.get(agentId);
     if (!agent) throw new Error(`Agent ${agentId} not found`);
     if (!goal.trim()) throw new Error("Agent goal must not be empty");
+    const initialization = this.initialization.get(agent.id);
+    if (initialization) await initialization;
     await this.ensurePageReady(agent);
     if (!await this.isAuthenticated(agent.page)) throw new Error("ChatGPT is not logged in");
     const conversationUrl = agent.conversationUrl || agent.page.url();
@@ -108,6 +119,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     this.context = undefined;
     this.dashboardPage = undefined;
     this.agents.clear();
+    this.initialization.clear();
     if (context) await context.close().catch((error) => console.error("[BrowserCodingAgent] Playwright context close failed:", error));
   }
 
@@ -140,13 +152,26 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
       if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(agent.page.url()) || agent.page.url() === "about:blank") await agent.page.goto(target, { waitUntil: "domcontentloaded", timeout: 30000 });
       await this.waitForComposerOrLogin(agent.page, 30000);
       if (!await this.isAuthenticated(agent.page)) { this.patch(agent, { status: "login-required", lastError: "请在托管的 Chromium 中完成 ChatGPT 登录，然后点击继续。" }); return; }
+      if (agent.prompt) {
+        const prompt = agent.prompt;
+        delete agent.prompt;
+        this.patch(agent, { status: "initializing", conversationUrl: agent.page.url(), lastError: "" });
+        if (this.looksLikeGitHubRequest(prompt) && !await this.selectChatGPTApp(agent.page, GITHUB_APP_NAME)) throw new Error("GitHub App could not be selected before the first message");
+        await this.sendNow(agent, prompt);
+        return;
+      }
       this.patch(agent, { status: "idle", conversationUrl: agent.page.url(), lastError: "" });
-      if (agent.prompt) { const prompt = agent.prompt; delete agent.prompt; await this.send(agent, prompt); }
     } catch (error) { if (!this.stopping) this.patch(agent, { status: "failed", lastError: error instanceof Error ? error.message : String(error) }); }
     finally { await this.keepDashboardForeground(); }
   }
 
   private async send(agent: ManagedAgent, text: string): Promise<void> {
+    const initialization = this.initialization.get(agent.id);
+    if (initialization) await initialization;
+    await this.sendNow(agent, text);
+  }
+
+  private async sendNow(agent: ManagedAgent, text: string): Promise<void> {
     const message = text.trim();
     if (!message) throw new Error("Message cannot be empty");
     await this.ensurePageReady(agent);
@@ -157,8 +182,10 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     this.patch(agent, { status: "sending", lastError: "" });
     this.pushMessage(agent, { role: "user", text: message, createdAt });
     this.emit({ type: "agent.message", agentId: agent.id, role: "user", text: message, url: agent.page.url(), createdAt });
-    if (this.looksLikeGitHubRequest(message) && await this.selectChatGPTApp(agent.page, GITHUB_APP_NAME)) await this.submitComposerAfterAppSelection(agent.page, message);
-    else await this.submitComposer(agent.page, message);
+    if (this.looksLikeGitHubRequest(message)) {
+      if (!await this.selectChatGPTApp(agent.page, GITHUB_APP_NAME)) throw new Error("GitHub App could not be selected before sending the message");
+      await this.submitComposerAfterAppSelection(agent.page, message);
+    } else await this.submitComposer(agent.page, message);
     this.patch(agent, { status: "waiting", conversationUrl: agent.page.url() });
     await this.waitForUserTurn(agent.page, previousUser, message);
     const response = await this.waitForAssistant(agent.page, previousAssistant, agent);
