@@ -177,21 +177,19 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
       const composer = page.locator(target.kind === "contenteditable" ? "[contenteditable='true']" : target.kind === "textarea" ? "textarea" : "[role='textbox']").nth(target.index);
       if (!await this.isUsableElement(composer)) return false;
       await composer.click({ timeout: 5000 });
-      await composer.pressSequentially("@", { delay: 20 });
+      // One continuous @GitHub gesture: never append another @ while the menu is open.
+      await composer.pressSequentially(`@${appName}`, { delay: 35 });
+      if (await this.waitAndClickApp(page, appName, 4500)) return true;
+      // ChatGPT also accepts the currently highlighted @GitHub suggestion with Space.
+      await composer.press("Space").catch(() => undefined);
       await page.waitForTimeout(350);
-      await composer.pressSequentially(appName, { delay: 35 });
-      if (await this.waitAndClickApp(page, appName, 5000)) return true;
-      const menuItems = page.locator('[role="option"], [role="menuitem"], [role="listbox"] [role="button"]');
-      if (await menuItems.count()) {
-        const first = menuItems.last();
-        if (await this.isUsableElement(first)) { await first.click({ timeout: 3000 }); await page.waitForTimeout(300); return true; }
-      }
+      if (await this.isAppMentionActive(page, appName)) return true;
+      // Last resort: click the first visible GitHub candidate even if it has no semantic menu role.
+      if (await this.waitAndClickApp(page, appName, 1500)) return true;
       await composer.press("Escape").catch(() => undefined);
-      await composer.press("Backspace").catch(() => undefined);
-      await composer.press("Backspace").catch(() => undefined);
-      await composer.press("Backspace").catch(() => undefined);
+      await this.clearComposerMention(composer);
     } catch (error) {
-      console.warn(`[BrowserCodingAgent] ChatGPT App selection retry: ${error instanceof Error ? error.message : String(error)}`);
+      console.warn(`[BrowserCodingAgent] ChatGPT App selection failed: ${error instanceof Error ? error.message : String(error)}`);
     }
     const plusSelectors = ['button[aria-label*="Add" i]', 'button[aria-label*="添加" i]', 'button[data-testid*="composer" i]', 'button[data-testid*="attach" i]'];
     for (const selector of plusSelectors) {
@@ -216,18 +214,37 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
         for (let index = await candidates.count() - 1; index >= 0; index -= 1) {
           const candidate = candidates.nth(index);
           if (!await this.isUsableElement(candidate)) continue;
-          const tag = await candidate.evaluate((node) => node.tagName.toLowerCase()).catch(() => "");
-          const role = await candidate.getAttribute("role").catch(() => null);
-          if (tag === "button" || tag === "a" || role === "option" || role === "menuitem" || role === "button" || role === "listitem") {
-            await candidate.click({ timeout: 3000 });
-            await page.waitForTimeout(250);
-            return true;
-          }
+          // Do not require a specific role: ChatGPT may render the App suggestion as a div/list item.
+          await candidate.click({ timeout: 1500 }).catch(async () => {
+            const parent = candidate.locator("..", { has: candidate }).first();
+            if (await this.isUsableElement(parent)) await parent.click({ timeout: 1500 });
+            else throw new Error("GitHub candidate is not clickable");
+          });
+          await page.waitForTimeout(250);
+          return true;
         }
-      } catch { /* page may be navigating; retry */ }
+      } catch { /* page may be navigating or menu may still be rendering; retry */ }
       await page.waitForTimeout(150);
     }
     return false;
+  }
+
+  private async isAppMentionActive(page: Page, appName: string): Promise<boolean> {
+    try {
+      return await page.evaluate((name) => {
+        const visible = (node: HTMLElement) => { const style = getComputedStyle(node); const rect = node.getBoundingClientRect(); return style.display !== "none" && style.visibility !== "hidden" && rect.width > 1 && rect.height > 1; };
+        const bodyText = document.body?.innerText ?? "";
+        const composerNodes = Array.from(document.querySelectorAll<HTMLElement>("[contenteditable='true'], textarea, [role='textbox']"));
+        const composer = composerNodes.reverse().find(visible);
+        const value = composer?.textContent ?? (composer as HTMLTextAreaElement | undefined)?.value ?? "";
+        const menuStillOpen = Array.from(document.querySelectorAll<HTMLElement>("[role='option'], [role='menuitem'], [role='listbox']")).some(visible);
+        return (value.includes(name) && !value.includes(`@${name}`)) || (!menuStillOpen && bodyText.includes(name));
+      }, appName);
+    } catch { return false; }
+  }
+
+  private async clearComposerMention(composer: ReturnType<Page["locator"]>): Promise<void> {
+    try { await composer.press("Control+A"); await composer.press("Backspace"); } catch { /* best effort */ }
   }
 
   private async submitComposerAfterAppSelection(page: Page, text: string): Promise<void> {
