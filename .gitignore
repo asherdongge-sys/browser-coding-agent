@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.browser-coding-agent/
+.env
+.env.*
+!.env.example
