@@ -5,7 +5,6 @@ const CHATGPT_URL = "https://chatgpt.com/";
 const DASHBOARD_URL = process.env.BROWSER_CODING_AGENT_DASHBOARD_URL ?? "http://127.0.0.1:4317/";
 const RESPONSE_TIMEOUT_MS = 120000;
 const STABILITY_MS = 1000;
-const TURN_IDLE_TIMEOUT_MS = 30000;
 
 export type PlaywrightBrowserProviderOptions = {
   profileDir?: string;
@@ -52,7 +51,6 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
   async createAgent(title: string, prompt: string): Promise<BrowserAgent> {
     await this.start();
     if (this.stopping || !this.context) throw new Error("Browser provider is not running");
-
     const page = await this.context.newPage();
     this.observePage(page);
     const normalizedPrompt = prompt.trim();
@@ -65,7 +63,6 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
       updatedAt: Date.now(),
       page,
     };
-
     this.agents.set(agent.id, agent);
     this.emit({ type: "agent.created", agent: this.publicAgent(agent) });
     await this.keepDashboardForeground();
@@ -95,8 +92,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     this.dashboardPage = undefined;
     this.agents.clear();
     if (context) {
-      try { await context.close(); }
-      catch (error) { console.error("[BrowserCodingAgent] Playwright context close failed:", error); }
+      try { await context.close(); } catch (error) { console.error("[BrowserCodingAgent] Playwright context close failed:", error); }
     }
     if (this.startPromise) {
       try { await this.startPromise; } catch { /* startup failure already reported */ }
@@ -104,22 +100,19 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
   }
 
   private async startInternal(): Promise<void> {
-    const launchOptions = {
+    const context = await chromium.launchPersistentContext(this.profileDir, {
       headless: this.headless,
       viewport: { width: 1440, height: 900 },
       ignoreDefaultArgs: ["--no-sandbox"],
       ...(this.executablePath ? { executablePath: this.executablePath } : {}),
-    };
-    const context = await chromium.launchPersistentContext(this.profileDir, launchOptions);
+    });
     this.context = context;
     if (this.stopping) {
       await context.close();
       this.context = undefined;
       throw new Error("Browser provider stopped during startup");
     }
-
-    const pages = context.pages();
-    const startupPage = pages[0] ?? await context.newPage();
+    const startupPage = context.pages()[0] ?? await context.newPage();
     this.observePage(startupPage);
     this.dashboardPage = startupPage;
     await this.openDashboard(startupPage);
@@ -128,16 +121,13 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
   }
 
   private async openDashboard(page: Page): Promise<void> {
-    const maxAttempts = 20;
-    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    for (let attempt = 1; attempt <= 20; attempt += 1) {
       if (this.stopping) throw new Error("Browser provider is stopping");
       try {
-        if (page.url() !== DASHBOARD_URL) {
-          await page.goto(DASHBOARD_URL, { waitUntil: "domcontentloaded", timeout: 3000 });
-        }
+        if (page.url() !== DASHBOARD_URL) await page.goto(DASHBOARD_URL, { waitUntil: "domcontentloaded", timeout: 3000 });
         return;
       } catch (error) {
-        if (attempt === maxAttempts) throw error;
+        if (attempt === 20) throw error;
         await new Promise((resolve) => setTimeout(resolve, 250));
       }
     }
@@ -151,17 +141,12 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
 
   private async initializeAgent(agent: ManagedAgent): Promise<void> {
     try {
-      if (this.stopping) throw new Error("Browser provider is stopping");
-      if (agent.page.isClosed()) throw new Error("Agent browser page is closed");
+      if (this.stopping || agent.page.isClosed()) throw new Error("Agent browser page is unavailable");
       this.patch(agent, { status: "opening-chatgpt", lastError: "" });
-      await this.keepDashboardForeground();
-
       if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(agent.page.url())) {
         await agent.page.goto(CHATGPT_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
       }
-      await this.keepDashboardForeground();
       await this.waitForComposerOrLogin(agent.page, 30000);
-      await this.keepDashboardForeground();
       if (!await this.isAuthenticated(agent.page)) {
         this.patch(agent, { status: "login-required", lastError: "请在托管的 Chromium 中完成 ChatGPT 登录，然后点击继续。" });
         return;
@@ -180,39 +165,31 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
   }
 
   private async send(agent: ManagedAgent, text: string): Promise<void> {
-    if (!text.trim()) throw new Error("Message cannot be empty");
+    const message = text.trim();
+    if (!message) throw new Error("Message cannot be empty");
     await this.ensurePageReady(agent);
-    if (!await this.isAuthenticated(agent.page)) {
-      this.patch(agent, { status: "login-required", lastError: "ChatGPT 登录态不可用" });
-      throw new Error("ChatGPT is not logged in");
-    }
+    if (!await this.isAuthenticated(agent.page)) throw new Error("ChatGPT is not logged in");
 
-    await this.waitForTurnIdle(agent.page);
     const previousAssistant = await this.latestAssistant(agent.page);
     const previousUser = await this.latestUser(agent.page);
     this.patch(agent, { status: "sending", lastError: "" });
-    this.emit({ type: "agent.message", agentId: agent.id, role: "user", text, url: agent.page.url() });
+    this.emit({ type: "agent.message", agentId: agent.id, role: "user", text: message, url: agent.page.url() });
 
-    await this.fillComposer(agent.page, text);
+    await this.submitComposer(agent.page, message);
     await this.keepDashboardForeground();
     this.patch(agent, { status: "waiting", conversationUrl: agent.page.url() });
 
-    // Do not start waiting for the assistant until ChatGPT has actually accepted
-    // the user turn. This is important for turn #2+: a filled composer by itself
-    // does not mean the message was submitted.
-    await this.waitForUserTurn(agent.page, previousUser, text);
+    await this.waitForUserTurn(agent.page, previousUser, message);
     const response = await this.waitForAssistant(agent.page, previousAssistant);
-    await this.waitForTurnIdle(agent.page);
     this.emit({ type: "agent.message", agentId: agent.id, role: "assistant", text: response, url: agent.page.url() });
     this.patch(agent, { status: "idle", conversationUrl: agent.page.url(), lastError: "" });
+    await this.keepDashboardForeground();
   }
 
   private async ensurePageReady(agent: ManagedAgent): Promise<void> {
-    if (this.stopping) throw new Error("Browser provider is stopping");
-    if (agent.page.isClosed()) throw new Error("Agent browser page is closed");
+    if (this.stopping || agent.page.isClosed()) throw new Error("Agent browser page is unavailable");
     if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(agent.page.url())) {
       await agent.page.goto(CHATGPT_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
-      await this.keepDashboardForeground();
     }
     await this.waitForComposerOrLogin(agent.page, 30000);
   }
@@ -227,85 +204,61 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
 
   private async isAuthenticated(page: Page): Promise<boolean> {
     return page.evaluate(() => {
-      const path = location.pathname;
-      if (/\/auth\//i.test(path) || /\/login/i.test(path)) return false;
+      if (/\/auth\//i.test(location.pathname) || /\/login/i.test(location.pathname)) return false;
       return Boolean(document.querySelector("[contenteditable='true'], textarea, [role='textbox']"));
     });
   }
 
-  private async waitForTurnIdle(page: Page): Promise<void> {
-    await page.waitForFunction(() => {
-      const stopButton = document.querySelector('button[data-testid="stop-button"], button[aria-label*="Stop generating" i], button[aria-label*="停止" i]');
-      if (stopButton) return false;
-      const composer = document.querySelector<HTMLElement>("[contenteditable='true'], textarea, [role='textbox']");
-      if (!composer) return false;
-      const disabled = composer instanceof HTMLInputElement || composer instanceof HTMLTextAreaElement
-        ? composer.disabled
-        : composer.getAttribute("aria-disabled") === "true" || composer.getAttribute("contenteditable") === "false";
-      return !disabled;
-    }, undefined, { timeout: TURN_IDLE_TIMEOUT_MS });
-  }
-
-  private async fillComposer(page: Page, text: string): Promise<void> {
-    const composer = page.locator("[contenteditable='true'], textarea, [role='textbox']").filter({ visible: true }).first();
+  private async submitComposer(page: Page, text: string): Promise<void> {
+    const selectors = ["[contenteditable='true']", "textarea", "[role='textbox']"];
+    let composer = page.locator(selectors.join(", ")).first();
     await composer.waitFor({ state: "visible", timeout: 15000 });
     await composer.click();
     await composer.fill(text);
-
-    // React/ProseMirror can update asynchronously. Verify that the text really
-    // reached the live composer before trying to submit it.
     await page.waitForFunction((expected) => {
-      const node = document.querySelector<HTMLElement>("[contenteditable='true'], textarea, [role='textbox']");
-      if (!node) return false;
-      const value = node instanceof HTMLTextAreaElement ? node.value : node.innerText || node.textContent || "";
-      return value.trim() === String(expected).trim();
+      const nodes = Array.from(document.querySelectorAll<HTMLElement>("[contenteditable='true'], textarea, [role='textbox']"));
+      return nodes.some((node) => {
+        const value = node instanceof HTMLTextAreaElement ? node.value : node.innerText || node.textContent || "";
+        return value.trim() === String(expected).trim();
+      });
     }, text, { timeout: 5000 });
 
-    const sendButton = page.locator('button[data-testid="send-button"], button[aria-label*="Send" i], button[aria-label*="发送" i], button[type="submit"]').filter({ visible: true }).first();
-    if (await sendButton.count() > 0) {
-      const disabled = await sendButton.isDisabled().catch(() => false);
-      if (!disabled) {
-        await sendButton.click();
-        return;
-      }
+    const sendCandidates = [
+      'button[data-testid="send-button"]',
+      'button[aria-label*="Send" i]',
+      'button[aria-label*="发送" i]',
+      'button[type="submit"]',
+    ];
+    for (const selector of sendCandidates) {
+      const button = page.locator(selector).filter({ visible: true }).last();
+      if (await button.count() === 0) continue;
+      if (await button.isDisabled().catch(() => true)) continue;
+      await button.click();
+      return;
     }
 
-    // ChatGPT's current UI reliably submits the composer with Enter when the
-    // send button is not exposed. Use a real keyboard event, then verify below.
     await composer.press("Enter");
   }
 
   private async latestAssistant(page: Page): Promise<AssistantSnapshot> {
     return page.evaluate(() => {
-      const selectors = [
-        "[data-message-author-role='assistant']",
-        "article[data-testid^='conversation-turn'] [data-message-author-role='assistant']",
-        "[data-testid^='conversation-turn'] [data-message-author-role='assistant']",
-      ];
-      const nodes = selectors.flatMap((selector) => Array.from(document.querySelectorAll<HTMLElement>(selector)));
-      const unique = [...new Set(nodes)];
-      const texts = unique.map((node) => node.innerText.trim()).filter(Boolean);
+      const nodes = Array.from(document.querySelectorAll<HTMLElement>("[data-message-author-role='assistant']"));
+      const texts = [...new Set(nodes)].map((node) => node.innerText.trim()).filter(Boolean);
       return { text: texts.at(-1) ?? "", count: texts.length };
     });
   }
 
   private async latestUser(page: Page): Promise<UserSnapshot> {
     return page.evaluate(() => {
-      const selectors = [
-        "[data-message-author-role='user']",
-        "article[data-testid^='conversation-turn'] [data-message-author-role='user']",
-        "[data-testid^='conversation-turn'] [data-message-author-role='user']",
-      ];
-      const nodes = selectors.flatMap((selector) => Array.from(document.querySelectorAll<HTMLElement>(selector)));
-      const unique = [...new Set(nodes)];
-      const texts = unique.map((node) => node.innerText.trim()).filter(Boolean);
+      const nodes = Array.from(document.querySelectorAll<HTMLElement>("[data-message-author-role='user']"));
+      const texts = [...new Set(nodes)].map((node) => node.innerText.trim()).filter(Boolean);
       return { text: texts.at(-1) ?? "", count: texts.length };
     });
   }
 
   private async waitForUserTurn(page: Page, previous: UserSnapshot, expected: string): Promise<void> {
-    const started = Date.now();
-    while (Date.now() - started < 15000) {
+    const deadline = Date.now() + 15000;
+    while (Date.now() < deadline) {
       const current = await this.latestUser(page);
       if (current.count > previous.count || current.text === expected.trim()) return;
       await page.waitForTimeout(250);
@@ -314,18 +267,14 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
   }
 
   private async waitForAssistant(page: Page, previous: AssistantSnapshot): Promise<string> {
-    const started = Date.now();
+    const deadline = Date.now() + RESPONSE_TIMEOUT_MS;
     let last = "";
     let stableSince = 0;
-
-    while (Date.now() - started < RESPONSE_TIMEOUT_MS) {
+    while (Date.now() < deadline) {
       const current = await this.latestAssistant(page);
       const changed = current.count > previous.count || (current.text.length > 0 && current.text !== previous.text);
       if (changed && current.text) {
-        if (current.text !== last) {
-          last = current.text;
-          stableSince = Date.now();
-        }
+        if (current.text !== last) { last = current.text; stableSince = Date.now(); }
         if (Date.now() - stableSince >= STABILITY_MS) return current.text;
       }
       await page.waitForTimeout(500);
@@ -336,9 +285,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
   private observePage(page: Page): void {
     page.on("close", () => {
       if (this.dashboardPage === page) this.dashboardPage = undefined;
-      for (const agent of this.agents.values()) if (agent.page === page) {
-        this.patch(agent, { status: "tab-closed", lastError: "浏览器页面已关闭" });
-      }
+      for (const agent of this.agents.values()) if (agent.page === page) this.patch(agent, { status: "tab-closed", lastError: "浏览器页面已关闭" });
     });
   }
 
@@ -353,5 +300,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     return publicAgent;
   }
 
-  private emit(event: BrowserAgentEvent): void { if (this.onEvent) this.onEvent(event); }
+  private emit(event: BrowserAgentEvent): void {
+    try { this.onEvent?.(event); } catch (error) { console.error("[BrowserCodingAgent] event handler failed:", error); }
+  }
 }
