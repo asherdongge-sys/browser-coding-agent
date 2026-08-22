@@ -6,7 +6,7 @@ export const GITHUB_OAUTH_CLIENT_ID: string = "Ov23liq1GT66HkGW5Qn9";
 const OAUTH_CONFIG_FILE = join(process.cwd(), ".github-oauth.local.json");
 
 export type GitHubConnection = { accessToken: string; login?: string; name?: string; connectedAt: number };
-type GitHubOAuthConfig = { clientId?: string; clientSecret?: string };
+type GitHubOAuthConfig = { clientId: string; clientSecret?: string };
 type OAuthState = { value: string; verifier: string; createdAt: number };
 const storeDir = join(process.cwd(), ".browser-coding-agent");
 const storeFile = join(storeDir, "github-oauth.json");
@@ -15,9 +15,12 @@ let state: OAuthState | undefined;
 async function getOAuthConfig(): Promise<GitHubOAuthConfig> {
   try {
     const raw = await readFile(OAUTH_CONFIG_FILE, "utf8");
-    const parsed = JSON.parse(raw) as GitHubOAuthConfig;
-    return { clientId: parsed.clientId || GITHUB_OAUTH_CLIENT_ID, clientSecret: parsed.clientSecret };
-  } catch { return { clientId: GITHUB_OAUTH_CLIENT_ID }; }
+    const parsed = JSON.parse(raw) as { clientId?: string; clientSecret?: string };
+    const clientId = parsed.clientId || GITHUB_OAUTH_CLIENT_ID;
+    return parsed.clientSecret ? { clientId, clientSecret: parsed.clientSecret } : { clientId };
+  } catch {
+    return { clientId: GITHUB_OAUTH_CLIENT_ID };
+  }
 }
 
 export async function getGitHubConnection(): Promise<GitHubConnection | undefined> {
