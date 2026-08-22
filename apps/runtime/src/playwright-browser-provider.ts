@@ -14,6 +14,7 @@ export type PlaywrightBrowserProviderOptions = {
 };
 
 type ManagedAgent = BrowserAgent & { page: Page };
+type AssistantSnapshot = { text: string; count: number };
 
 export class PlaywrightBrowserProvider implements BrowserProvider {
   readonly kind = "playwright" as const;
@@ -156,10 +157,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
       if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(agent.page.url())) {
         await agent.page.goto(CHATGPT_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
       }
-      // ChatGPT is a background implementation page. Return focus immediately
-      // after navigation so the user's browser stays on our Dashboard.
       await this.keepDashboardForeground();
-
       await this.waitForComposerOrLogin(agent.page, 30000);
       await this.keepDashboardForeground();
       if (!await this.isAuthenticated(agent.page)) {
@@ -186,6 +184,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
       this.patch(agent, { status: "login-required", lastError: "ChatGPT 登录态不可用" });
       throw new Error("ChatGPT is not logged in");
     }
+
     const previous = await this.latestAssistant(agent.page);
     this.patch(agent, { status: "sending", lastError: "" });
     await this.keepDashboardForeground();
@@ -193,6 +192,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     await this.fillComposer(agent.page, text);
     await this.keepDashboardForeground();
     this.patch(agent, { status: "waiting", conversationUrl: agent.page.url() });
+
     const response = await this.waitForAssistant(agent.page, previous);
     this.emit({ type: "agent.message", agentId: agent.id, role: "assistant", text: response, url: agent.page.url() });
     this.patch(agent, { status: "idle", conversationUrl: agent.page.url(), lastError: "" });
@@ -234,23 +234,27 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     await composer.press("Enter");
   }
 
-  private async latestAssistant(page: Page): Promise<{ text: string; count: number }> {
+  private async latestAssistant(page: Page): Promise<AssistantSnapshot> {
     return page.evaluate(() => {
-      const nodes = Array.from(document.querySelectorAll<HTMLElement>("[data-message-author-role='assistant'], article"));
+      const nodes = Array.from(document.querySelectorAll<HTMLElement>("[data-message-author-role='assistant']"));
       const texts = nodes.map((node) => node.innerText.trim()).filter(Boolean);
       return { text: texts.at(-1) ?? "", count: texts.length };
     });
   }
 
-  private async waitForAssistant(page: Page, previous: { text: string; count: number }): Promise<string> {
+  private async waitForAssistant(page: Page, previous: AssistantSnapshot): Promise<string> {
     const started = Date.now();
     let last = "";
     let stableSince = 0;
+
     while (Date.now() - started < RESPONSE_TIMEOUT_MS) {
       const current = await this.latestAssistant(page);
-      const changed = current.count > previous.count || current.text.length > previous.text.length;
+      const changed = current.count > previous.count || (current.text.length > 0 && current.text !== previous.text);
       if (changed && current.text) {
-        if (current.text !== last) { last = current.text; stableSince = Date.now(); }
+        if (current.text !== last) {
+          last = current.text;
+          stableSince = Date.now();
+        }
         if (Date.now() - stableSince >= STABILITY_MS) return current.text;
       }
       await page.waitForTimeout(500);
