@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { LocalWorkspace, type ReplaceEdit } from "@browser-coding-agent/workspace";
 import type { ToolDescriptor, ToolResult } from "@browser-coding-agent/protocol";
 
 export interface Tool<TArguments = unknown, TResult = unknown> {
@@ -22,20 +23,50 @@ export class ToolRegistry {
 
 export class WorkspaceManager {
   private root: string | undefined;
-  select(root: string): string { this.root = path.resolve(root); return this.root; }
+  private backend: LocalWorkspace | undefined;
+  private readonly snapshots = new Map<string, string>();
+
+  select(root: string): string {
+    this.root = path.resolve(root);
+    this.backend = new LocalWorkspace(this.root);
+    this.snapshots.clear();
+    return this.root;
+  }
+
   getRoot(): string { if (!this.root) throw new Error("No workspace selected"); return this.root; }
-  resolve(relativePath = "."): string {
-    const root = this.getRoot();
-    const resolved = path.resolve(root, relativePath);
-    const relative = path.relative(root, resolved);
-    if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error("Path escapes the selected workspace");
-    return resolved;
+
+  resolve(relativePath = "."): string { return this.getBackend().resolve(relativePath); }
+
+  async read(relativePath: string, range?: { startLine: number; endLine: number }): Promise<string> {
+    const file = await this.getBackend().read(relativePath, range);
+    this.snapshots.set(relativePath, file.sha256);
+    return file.content;
+  }
+
+  async write(relativePath: string, content: string, expectedSha256?: string): Promise<{ path: string; sha256: string; changed: boolean }> {
+    const expected = expectedSha256 ?? this.snapshots.get(relativePath);
+    const result = await this.getBackend().write(relativePath, content, expected ? { expectedSha256: expected } : undefined);
+    this.snapshots.set(relativePath, result.sha256);
+    return { path: result.path, sha256: result.sha256, changed: result.changed };
+  }
+
+  async applyEdits(relativePath: string, edits: readonly ReplaceEdit[], expectedSha256?: string): Promise<{ path: string; sha256: string; changed: boolean }> {
+    const expected = expectedSha256 ?? this.snapshots.get(relativePath);
+    const result = await this.getBackend().applyEdits(relativePath, edits, expected ? { expectedSha256: expected } : undefined);
+    this.snapshots.set(relativePath, result.sha256);
+    return { path: result.path, sha256: result.sha256, changed: result.changed };
+  }
+
+  private getBackend(): LocalWorkspace {
+    if (!this.backend) throw new Error("No workspace selected");
+    return this.backend;
   }
 }
 
 export interface FsListArguments { readonly path?: string; }
-export interface FsReadArguments { readonly path: string; readonly encoding?: BufferEncoding; }
-export interface FsWriteArguments { readonly path: string; readonly content: string; }
+export interface FsReadArguments { readonly path: string; readonly encoding?: BufferEncoding; readonly startLine?: number; readonly endLine?: number; }
+export interface FsWriteArguments { readonly path: string; readonly content: string; readonly expectedSha256?: string; }
+export interface FsPatchArguments { readonly path: string; readonly edits: readonly ReplaceEdit[]; readonly expectedSha256?: string; }
 export interface FsSearchArguments { readonly query: string; readonly path?: string; }
 export interface TerminalExecArguments { readonly command: string; readonly cwd?: string; readonly timeoutMs?: number; }
 
@@ -47,24 +78,33 @@ export function createFilesystemTools(workspace: WorkspaceManager): Tool[] {
     async execute(args) { try { const entries = await fs.readdir(workspace.resolve(args.path ?? "."), { withFileTypes: true }); return { ok: true, result: entries.map((entry) => `${entry.isDirectory() ? "dir" : "file"}\t${entry.name}`) }; } catch (error) { return toolError(error); } },
   };
   const read: Tool<FsReadArguments, string> = {
-    descriptor: { name: "fs.read", description: "Read a UTF-8 file in the selected workspace.", risk: "read" },
-    async execute(args) { try { const content = await fs.readFile(workspace.resolve(args.path), args.encoding ?? "utf8"); return { ok: true, result: content.toString() }; } catch (error) { return toolError(error); } },
+    descriptor: { name: "fs.read", description: "Read a UTF-8 file in the selected workspace, optionally by line range.", risk: "read" },
+    async execute(args) {
+      try {
+        const range = args.startLine !== undefined || args.endLine !== undefined ? { startLine: args.startLine ?? 1, endLine: args.endLine ?? args.startLine ?? 1 } : undefined;
+        return { ok: true, result: await workspace.read(args.path, range) };
+      } catch (error) { return toolError(error); }
+    },
   };
-  const write: Tool<FsWriteArguments, { path: string }> = {
-    descriptor: { name: "fs.write", description: "Write a file in the selected workspace.", risk: "write" },
-    async execute(args) { try { const target = workspace.resolve(args.path); await fs.mkdir(path.dirname(target), { recursive: true }); await fs.writeFile(target, args.content, "utf8"); return { ok: true, result: { path: target } }; } catch (error) { return toolError(error); } },
+  const write: Tool<FsWriteArguments, { path: string; sha256: string; changed: boolean }> = {
+    descriptor: { name: "fs.write", description: "Safely write a workspace file with an optimistic SHA precondition when the file was previously read.", risk: "write" },
+    async execute(args) { try { return { ok: true, result: await workspace.write(args.path, args.content, args.expectedSha256) }; } catch (error) { return toolError(error); } },
+  };
+  const patch: Tool<FsPatchArguments, { path: string; sha256: string; changed: boolean }> = {
+    descriptor: { name: "fs.patch", description: "Apply exact, non-overlapping text edits with SHA preconditions and atomic writes.", risk: "write" },
+    async execute(args) { try { return { ok: true, result: await workspace.applyEdits(args.path, args.edits, args.expectedSha256) }; } catch (error) { return toolError(error); } },
   };
   const search: Tool<FsSearchArguments, string[]> = {
     descriptor: { name: "fs.search", description: "Search text recursively in common source files.", risk: "read" },
     async execute(args) {
       try {
-        const root = workspace.resolve(args.path ?? "."); const results: string[] = []; const ignored = new Set([".git", "node_modules", "dist", "build"]);
-        async function walk(directory: string): Promise<void> { for (const entry of await fs.readdir(directory, { withFileTypes: true })) { if (ignored.has(entry.name)) continue; const target = path.join(directory, entry.name); if (entry.isDirectory()) await walk(target); else if (entry.isFile() && (await fs.stat(target)).size < 1024 * 1024) { const content = await fs.readFile(target, "utf8").catch(() => ""); if (content.includes(args.query)) results.push(path.relative(workspace.getRoot(), target)); } } }
-        await walk(root); return { ok: true, result: results };
+        const results = await workspace.getRoot();
+        const matches = await new LocalWorkspace(results).search(args.query, args.path ?? ".");
+        return { ok: true, result: matches.map((match) => `${match.path}:${match.line}\t${match.preview}`) };
       } catch (error) { return toolError(error); }
     },
   };
-  return [list, read, write, search];
+  return [list, read, write, patch, search];
 }
 
 export function createTerminalTools(workspace: WorkspaceManager): Tool[] {
