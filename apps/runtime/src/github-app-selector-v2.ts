@@ -4,6 +4,7 @@ type Composer = ReturnType<Page["locator"]>;
 
 const inFlight = new WeakMap<Page, Promise<boolean>>();
 const results = new WeakMap<Page, boolean>();
+const selectedComposers = new WeakMap<Page, Composer>();
 
 function isConversationPage(page: Page): boolean {
   try {
@@ -15,7 +16,12 @@ function isConversationPage(page: Page): boolean {
 }
 
 async function findComposer(page: Page): Promise<Composer | undefined> {
-  for (const selector of ["[contenteditable='true']:not([aria-hidden='true'])","textarea[name='prompt-textarea']:not(.wcDTda_fallbackTextarea)","textarea:not(.wcDTda_fallbackTextarea)","[role='textbox']:not([aria-hidden='true'])"]) {
+  for (const selector of [
+    "[contenteditable='true']:not([aria-hidden='true'])",
+    "textarea[name='prompt-textarea']:not(.wcDTda_fallbackTextarea)",
+    "textarea:not(.wcDTda_fallbackTextarea)",
+    "[role='textbox']:not([aria-hidden='true'])",
+  ]) {
     const nodes = page.locator(selector);
     for (let i = await nodes.count() - 1; i >= 0; i -= 1) {
       const node = nodes.nth(i);
@@ -31,14 +37,18 @@ async function waitForComposer(page: Page, timeoutMs = 30000): Promise<Composer 
     if (!isConversationPage(page)) return undefined;
     const composer = await findComposer(page);
     if (composer) return composer;
-    await page.waitForTimeout(250);
+    await page.waitForTimeout(300);
   }
   return undefined;
 }
 
 async function hasVisibleGitHubMenu(page: Page): Promise<boolean> {
   return page.evaluate(() => {
-    const visible = (node: HTMLElement) => { const style = getComputedStyle(node); const rect = node.getBoundingClientRect(); return style.display !== "none" && style.visibility !== "hidden" && rect.width > 1 && rect.height > 1; };
+    const visible = (node: HTMLElement) => {
+      const style = getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 1 && rect.height > 1;
+    };
     return Array.from(document.querySelectorAll<HTMLElement>("[role='option'], [role='menuitem'], [role='listbox']"))
       .some((node) => visible(node) && /github/i.test(node.innerText || node.textContent || ""));
   }).catch(() => false);
@@ -47,17 +57,22 @@ async function hasVisibleGitHubMenu(page: Page): Promise<boolean> {
 async function hasCommittedGitHubMention(page: Page): Promise<boolean> {
   if (!isConversationPage(page)) return false;
   return page.evaluate(() => {
-    const visible = (node: HTMLElement) => { const style = getComputedStyle(node); const rect = node.getBoundingClientRect(); return style.display !== "none" && style.visibility !== "hidden" && rect.width > 1 && rect.height > 1; };
+    const visible = (node: HTMLElement) => {
+      const style = getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 1 && rect.height > 1;
+    };
     const composerNodes = Array.from(document.querySelectorAll<HTMLElement>("[contenteditable='true'], textarea, [role='textbox']"));
     const composer = composerNodes.reverse().find(visible);
     if (!composer) return false;
-    const explicit = Array.from(composer.querySelectorAll<HTMLElement>("[data-mention], [data-testid*='mention' i], [aria-label*='GitHub' i]")).some(visible);
+    const explicit = Array.from(composer.querySelectorAll<HTMLElement>(
+      "[data-mention], [data-testid*='mention' i], [aria-label*='GitHub' i]",
+    )).some(visible);
     if (explicit) return true;
     const text = `${composer.textContent ?? ""} ${(composer as HTMLTextAreaElement).value ?? ""}`.trim();
-    // After Space ChatGPT commonly converts @GitHub into an inline app token
-    // whose visible text is GitHub rather than @GitHub. Require the composer
-    // itself to contain GitHub and make sure the suggestion menu is gone.
-    return /(^|\s)GitHub(?:\s|$)/i.test(text) && !/@GitHub/i.test(text) && !Array.from(document.querySelectorAll<HTMLElement>("[role='option'], [role='menuitem'], [role='listbox']")).some(visible);
+    return /(^|\s)GitHub(?:\s|$)/i.test(text) && !/@GitHub/i.test(text) && !Array.from(
+      document.querySelectorAll<HTMLElement>("[role='option'], [role='menuitem'], [role='listbox']"),
+    ).some(visible);
   }).catch(() => false);
 }
 
@@ -78,33 +93,37 @@ async function selectGitHubInternal(page: Page): Promise<boolean> {
   const composer = await waitForComposer(page);
   if (!composer) return false;
 
-  // Idempotency is enforced at the DOM level as well as by the Promise cache.
-  // This is important because several callers can reach initialization during
-  // Agent creation. Never append another @GitHub to an existing composer.
-  if (await hasCommittedGitHubMention(page)) return true;
+  if (await hasCommittedGitHubMention(page)) {
+    selectedComposers.set(page, composer);
+    return true;
+  }
 
   const existingText = await composerText(page);
   if (/@GitHub/i.test(existingText)) await clearComposer(page, composer);
 
+  // IMPORTANT: selection and subsequent message entry must use the same
+  // composer without clicking/refinding it again. ChatGPT can transiently
+  // render an app chip and then lose that chip when the editor is refocused.
   await composer.click({ timeout: 5000 });
   await composer.pressSequentially("@GitHub", { delay: 35 });
   await page.waitForTimeout(350);
   if (!isConversationPage(page)) return false;
 
-  // The current ChatGPT UI commits the first app suggestion with Space. Do
-  // exactly one commit gesture and never click a GitHub text node: such nodes
-  // can be links to the app detail page.
+  // ChatGPT's current UI commits the first app suggestion with Space.
+  // Never click a GitHub text node: those nodes can navigate to /apps/*.
   await composer.press("Space").catch(() => undefined);
   await page.waitForTimeout(700);
   if (!isConversationPage(page)) return false;
 
-  if (await hasCommittedGitHubMention(page)) return true;
+  if (await hasCommittedGitHubMention(page)) {
+    selectedComposers.set(page, composer);
+    return true;
+  }
 
-  // If ChatGPT did not expose a token but the suggestion menu disappeared and
-  // the composer now contains a GitHub token-shaped value, accept it. We do
-  // not perform a second @GitHub injection or a fallback navigation click.
   const textAfterCommit = await composerText(page);
-  return !await hasVisibleGitHubMenu(page) && /GitHub/i.test(textAfterCommit) && !/@GitHub/i.test(textAfterCommit);
+  const accepted = !await hasVisibleGitHubMenu(page) && /GitHub/i.test(textAfterCommit) && !/@GitHub/i.test(textAfterCommit);
+  if (accepted) selectedComposers.set(page, composer);
+  return accepted;
 }
 
 export function ensureGitHubSelectedV2(page: Page, _appName = "GitHub"): Promise<boolean> {
@@ -118,4 +137,34 @@ export function ensureGitHubSelectedV2(page: Page, _appName = "GitHub"): Promise
     .finally(() => inFlight.delete(page));
   inFlight.set(page, promise);
   return promise;
+}
+
+/**
+ * Type the user message into the SAME composer that committed the GitHub
+ * mention. Do not refocus/click/find another composer between these steps.
+ */
+export async function submitMessageAfterGitHubSelection(page: Page, text: string): Promise<void> {
+  const composer = selectedComposers.get(page) ?? await findComposer(page);
+  if (!composer) throw new Error("ChatGPT composer is not available after selecting GitHub");
+
+  // Deliberately do not click/focus here. The selection gesture may have
+  // created a special inline app token whose state is lost on editor refocus.
+  await page.keyboard.type(text, { delay: 5 });
+
+  for (const selector of [
+    'button[data-testid="send-button"]',
+    'button[aria-label*="Send" i]',
+    'button[aria-label*="发送" i]',
+    'button[type="submit"]',
+  ]) {
+    const buttons = page.locator(selector);
+    for (let index = await buttons.count() - 1; index >= 0; index -= 1) {
+      const button = buttons.nth(index);
+      if (!await button.isVisible().catch(() => false)) continue;
+      if (await button.isDisabled().catch(() => true)) continue;
+      await button.click({ timeout: 5000 });
+      return;
+    }
+  }
+  await page.keyboard.press("Enter");
 }
