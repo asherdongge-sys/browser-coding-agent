@@ -25,16 +25,17 @@ export class BrowserTaskExecutor {
   private plan(goal: string): BrowserToolCall[] {
     const calls: BrowserToolCall[] = [];
     const url = goal.match(/https?:\/\/[^\s，。]+/i)?.[0];
-    if (url) calls.push({ tool: "browser.navigate", arguments: { url } });
-
     const search = goal.match(/(?:搜索|搜一下|search(?: for)?|google|谷歌|百度)\s*[“\"]?([^”\"，。]+)[”\"]?/i);
-    if (search) {
-      const query = search[1]?.trim();
+    const wantsSearch = Boolean(search);
+
+    if (url) calls.push({ tool: "browser.navigate", arguments: { url } });
+    else if (wantsSearch && /google|谷歌/i.test(goal)) calls.push({ tool: "browser.navigate", arguments: { url: "https://www.google.com/" } });
+    else if (wantsSearch && /百度/i.test(goal)) calls.push({ tool: "browser.navigate", arguments: { url: "https://www.baidu.com/" } });
+
+    if (search?.[1]) {
+      const query = search[1].trim();
       if (query) {
-        if (!url && /google|谷歌/i.test(goal)) calls.push({ tool: "browser.navigate", arguments: { url: "https://www.google.com/" } });
-        else if (!url && /百度/i.test(goal)) calls.push({ tool: "browser.navigate", arguments: { url: "https://www.baidu.com/" } });
-        calls.push({ tool: "browser.type", arguments: { text: query } });
-        calls.push({ tool: "browser.press", arguments: { key: "Enter" } });
+        calls.push({ tool: "browser.search", arguments: { query } });
         calls.push({ tool: "browser.wait", arguments: { ms: 1200 } });
       }
     }
@@ -75,6 +76,28 @@ export class BrowserTaskExecutor {
           await this.page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
           return { ok: true, result: { url: this.page.url() } };
         }
+        case "browser.search": {
+          const query = String(call.arguments.query ?? "").trim();
+          if (!query) return { ok: false, error: "browser.search requires a query" };
+          const host = new URL(this.page.url()).hostname;
+          if (/google\./i.test(host)) {
+            const searchBox = this.page.locator("textarea[name='q'], input[name='q'], textarea[aria-label*='Search' i], input[aria-label*='Search' i]").last();
+            await searchBox.waitFor({ state: "visible", timeout: 10000 });
+            await searchBox.fill(query);
+            await searchBox.press("Enter");
+          } else if (/baidu\./i.test(host)) {
+            const searchBox = this.page.locator("#kw, input[name='wd'], textarea[name='wd']").last();
+            await searchBox.waitFor({ state: "visible", timeout: 10000 });
+            await searchBox.fill(query);
+            await searchBox.press("Enter");
+          } else {
+            const searchBox = this.page.locator("input[type='search']:visible, input[name='q']:visible, textarea:visible, [contenteditable='true']:visible, [role='textbox']:visible").last();
+            await searchBox.waitFor({ state: "visible", timeout: 10000 });
+            await searchBox.fill(query);
+            await searchBox.press("Enter");
+          }
+          return { ok: true, result: { searched: query, url: this.page.url() } };
+        }
         case "browser.click": {
           const text = String(call.arguments.text ?? "").trim();
           if (!text) return { ok: false, error: "browser.click requires text" };
@@ -94,9 +117,7 @@ export class BrowserTaskExecutor {
         case "browser.type": {
           const text = String(call.arguments.text ?? "");
           const selector = typeof call.arguments.selector === "string" ? call.arguments.selector : undefined;
-          const target = selector
-            ? this.page.locator(selector).last()
-            : this.page.locator("input:visible, textarea:visible, [contenteditable='true']:visible, [role='textbox']:visible").last();
+          const target = selector ? this.page.locator(selector).last() : this.page.locator("input:visible, textarea:visible, [contenteditable='true']:visible, [role='textbox']:visible").last();
           await target.waitFor({ state: "visible", timeout: 10000 });
           await target.fill(text, { timeout: 10000 });
           return { ok: true, result: { typed: text } };
