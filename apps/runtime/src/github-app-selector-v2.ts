@@ -53,61 +53,58 @@ async function hasCommittedGitHubMention(page: Page): Promise<boolean> {
     if (!composer) return false;
     const explicit = Array.from(composer.querySelectorAll<HTMLElement>("[data-mention], [data-testid*='mention' i], [aria-label*='GitHub' i]")).some(visible);
     if (explicit) return true;
-    const text = `${composer.textContent ?? ""} ${(composer as HTMLTextAreaElement).value ?? ""}`;
-    return /(^|\s)@GitHub(?:\s|$)/i.test(text) && !Array.from(document.querySelectorAll<HTMLElement>("[role='option'], [role='menuitem'], [role='listbox']")).some(visible);
+    const text = `${composer.textContent ?? ""} ${(composer as HTMLTextAreaElement).value ?? ""}`.trim();
+    // After Space ChatGPT commonly converts @GitHub into an inline app token
+    // whose visible text is GitHub rather than @GitHub. Require the composer
+    // itself to contain GitHub and make sure the suggestion menu is gone.
+    return /(^|\s)GitHub(?:\s|$)/i.test(text) && !/@GitHub/i.test(text) && !Array.from(document.querySelectorAll<HTMLElement>("[role='option'], [role='menuitem'], [role='listbox']")).some(visible);
   }).catch(() => false);
 }
 
-async function visibleGitHubOption(page: Page): Promise<ReturnType<Page["locator"]> | undefined> {
-  const options = page.getByText("GitHub", { exact: true });
-  for (let i = await options.count() - 1; i >= 0; i -= 1) {
-    const option = options.nth(i);
-    if (!await option.isVisible().catch(() => false)) continue;
-    const navigation = await option.evaluate((node) => Boolean(node.closest("a[href], [href]"))).catch(() => true);
-    if (!navigation) return option;
-  }
-  return undefined;
+async function composerText(page: Page): Promise<string> {
+  const composer = await findComposer(page);
+  if (!composer) return "";
+  return composer.evaluate((node) => `${node.textContent ?? ""} ${(node as HTMLTextAreaElement).value ?? ""}`).catch(() => "");
 }
 
-async function composerAlreadyContainsMention(page: Page): Promise<boolean> {
-  const composer = await findComposer(page);
-  if (!composer) return false;
-  const text = await composer.evaluate((node) => `${node.textContent ?? ""} ${(node as HTMLTextAreaElement).value ?? ""}`).catch(() => "");
-  return /@GitHub/i.test(text);
+async function clearComposer(page: Page, composer: Composer): Promise<void> {
+  await composer.click({ timeout: 5000 }).catch(() => undefined);
+  await composer.press("Control+A").catch(() => undefined);
+  await composer.press("Backspace").catch(() => undefined);
+  await page.waitForTimeout(100);
 }
 
 async function selectGitHubInternal(page: Page): Promise<boolean> {
   const composer = await waitForComposer(page);
   if (!composer) return false;
+
+  // Idempotency is enforced at the DOM level as well as by the Promise cache.
+  // This is important because several callers can reach initialization during
+  // Agent creation. Never append another @GitHub to an existing composer.
   if (await hasCommittedGitHubMention(page)) return true;
-  if (await composerAlreadyContainsMention(page)) {
-    await composer.press("Space").catch(() => undefined);
-    await page.waitForTimeout(500);
-    return isConversationPage(page) && !await hasVisibleGitHubMenu(page);
-  }
+
+  const existingText = await composerText(page);
+  if (/@GitHub/i.test(existingText)) await clearComposer(page, composer);
+
   await composer.click({ timeout: 5000 });
-  // One and only one injection per selection attempt. If it fails, do not
-  // type the mention again; otherwise retries become @GitHub @GitHub ... .
   await composer.pressSequentially("@GitHub", { delay: 35 });
   await page.waitForTimeout(350);
   if (!isConversationPage(page)) return false;
 
-  // In the current ChatGPT UI Space is the stable keyboard commit action.
+  // The current ChatGPT UI commits the first app suggestion with Space. Do
+  // exactly one commit gesture and never click a GitHub text node: such nodes
+  // can be links to the app detail page.
   await composer.press("Space").catch(() => undefined);
   await page.waitForTimeout(700);
   if (!isConversationPage(page)) return false;
-  if (await hasCommittedGitHubMention(page)) return true;
-  if (!await hasVisibleGitHubMenu(page) && await findComposer(page)) return true;
 
-  // Only a non-navigation menu item is allowed as a fallback. Never click
-  // an <a href> because that navigates to the GitHub app detail page.
-  const option = await visibleGitHubOption(page);
-  if (option) {
-    await option.click({ timeout: 2000 }).catch(() => undefined);
-    await page.waitForTimeout(500);
-    if (isConversationPage(page) && !await hasVisibleGitHubMenu(page)) return true;
-  }
-  return false;
+  if (await hasCommittedGitHubMention(page)) return true;
+
+  // If ChatGPT did not expose a token but the suggestion menu disappeared and
+  // the composer now contains a GitHub token-shaped value, accept it. We do
+  // not perform a second @GitHub injection or a fallback navigation click.
+  const textAfterCommit = await composerText(page);
+  return !await hasVisibleGitHubMenu(page) && /GitHub/i.test(textAfterCommit) && !/@GitHub/i.test(textAfterCommit);
 }
 
 export function ensureGitHubSelectedV2(page: Page, _appName = "GitHub"): Promise<boolean> {
@@ -115,7 +112,10 @@ export function ensureGitHubSelectedV2(page: Page, _appName = "GitHub"): Promise
   if (cached !== undefined) return Promise.resolve(cached);
   const running = inFlight.get(page);
   if (running) return running;
-  const promise = selectGitHubInternal(page).then((selected) => { results.set(page, selected); return selected; }).catch(() => { results.set(page, false); return false; }).finally(() => inFlight.delete(page));
+  const promise = selectGitHubInternal(page)
+    .then((selected) => { results.set(page, selected); return selected; })
+    .catch(() => { results.set(page, false); return false; })
+    .finally(() => inFlight.delete(page));
   inFlight.set(page, promise);
   return promise;
 }
