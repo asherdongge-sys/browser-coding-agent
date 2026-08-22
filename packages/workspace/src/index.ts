@@ -140,6 +140,7 @@ export class LocalWorkspace implements WorkspaceBackend {
     for (let index = 0; index < normalized.length - 1; index += 1) {
       const currentEdit = normalized[index];
       const nextEdit = normalized[index + 1];
+      if (!currentEdit || !nextEdit) continue;
       if (nextEdit.end > currentEdit.start) throw new Error(`Overlapping edits for ${relativePath}`);
     }
 
