@@ -1,6 +1,6 @@
 import type { Page } from "playwright";
 import { PlaywrightBrowserProvider } from "./playwright-browser-provider.js";
-import { ensureGitHubSelectedV2 } from "./github-app-selector-v2.js";
+import { ensureGitHubSelectedV2, submitMessageAfterGitHubSelection } from "./github-app-selector-v2.js";
 import { startChatGPTPageSync } from "./chatgpt-page-sync.js";
 
 type Managed = { id: string; page: Page; status?: string; conversationUrl?: string; lastError?: string; updatedAt?: number; messages?: unknown[] };
@@ -20,7 +20,12 @@ const nativeCreateAgent = provider.createAgent;
 const nativeEmit = provider.emit;
 
 async function findComposer(page: Page) {
-  const selectors = ["[contenteditable='true']:not([aria-hidden='true'])","textarea[name='prompt-textarea']:not(.wcDTda_fallbackTextarea)","textarea:not(.wcDTda_fallbackTextarea)","[role='textbox']:not([aria-hidden='true'])"];
+  const selectors = [
+    "[contenteditable='true']:not([aria-hidden='true'])",
+    "textarea[name='prompt-textarea']:not(.wcDTda_fallbackTextarea)",
+    "textarea:not(.wcDTda_fallbackTextarea)",
+    "[role='textbox']:not([aria-hidden='true'])",
+  ];
   for (const selector of selectors) {
     const locator = page.locator(selector);
     for (let index = await locator.count() - 1; index >= 0; index -= 1) {
@@ -69,20 +74,35 @@ provider.initializeAgent = async function initializeAgent(agent: Managed): Promi
   try {
     patchAgent(this, agent.id, { status: "opening-chatgpt", lastError: "" });
     if (agent.page.isClosed()) throw new Error("Agent browser page is unavailable");
-    if (!await isChatGPTPage(agent.page)) await agent.page.goto("https://chatgpt.com/", { waitUntil: "domcontentloaded", timeout: 30000 });
+
+    // Navigate at most once. Repeated goto() calls while ChatGPT is restoring
+    // the conversation can trigger rate limits and destroy the JS context.
+    if (!await isChatGPTPage(agent.page)) {
+      await agent.page.goto("https://chatgpt.com/", { waitUntil: "domcontentloaded", timeout: 30000 });
+    }
+
     const deadline = Date.now() + 45000;
     let composer = await findComposer(agent.page);
     while (!composer && Date.now() < deadline) {
-      if (!await isChatGPTPage(agent.page)) await agent.page.goto("https://chatgpt.com/", { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => undefined);
+      if (!await isChatGPTPage(agent.page)) {
+        patchAgent(this, agent.id, { status: "failed", conversationUrl: agent.page.url(), lastError: "ChatGPT navigated away while initializing; please retry after the page settles." });
+        return;
+      }
       composer = await findComposer(agent.page);
-      if (!composer) await agent.page.waitForTimeout(300);
+      if (!composer) await agent.page.waitForTimeout(500);
     }
+
     if (!composer) {
       const body = await agent.page.locator("body").innerText().catch(() => "");
       const loginRequired = /log in|sign in|登录|注册/i.test(body) || /\/auth\//i.test(agent.page.url());
-      patchAgent(this, agent.id, { status: loginRequired ? "login-required" : "failed", conversationUrl: agent.page.url(), lastError: loginRequired ? "请先在托管的 Chromium 中完成 ChatGPT 登录。" : "ChatGPT composer did not become ready within 45s" });
+      patchAgent(this, agent.id, {
+        status: loginRequired ? "login-required" : "failed",
+        conversationUrl: agent.page.url(),
+        lastError: loginRequired ? "请先在托管的 Chromium 中完成 ChatGPT 登录。" : "ChatGPT composer did not become ready within 45s",
+      });
       return;
     }
+
     patchAgent(this, agent.id, { status: "idle", conversationUrl: agent.page.url(), lastError: "" });
     const emit = (this as unknown as { onEvent?: (event: unknown) => void }).onEvent as ((event: any) => void) | undefined;
     const patch = (changes: Partial<Managed>) => patchAgent(this, agent.id, changes as Record<string, unknown>);
@@ -93,23 +113,10 @@ provider.initializeAgent = async function initializeAgent(agent: Managed): Promi
 };
 
 provider.submitComposerAfterAppSelection = async function submitComposerAfterAppSelection(page: Page, text: string): Promise<void> {
-  const composer = await findComposer(page);
-  if (!composer) throw new Error("ChatGPT composer is not visible after selecting GitHub");
-  await composer.focus({ timeout: 5000 });
-  const active = await page.evaluate(() => document.activeElement?.matches("[contenteditable='true'], textarea, [role='textbox']") ?? false).catch(() => false);
-  if (!active) throw new Error("ChatGPT composer lost focus after selecting GitHub");
-  await page.keyboard.type(text, { delay: 5 });
-  for (const selector of ['button[data-testid="send-button"]', 'button[aria-label*="Send" i]', 'button[aria-label*="发送" i]', 'button[type="submit"]']) {
-    const buttons = page.locator(selector);
-    for (let index = await buttons.count() - 1; index >= 0; index -= 1) {
-      const button = buttons.nth(index);
-      if (!await button.isVisible().catch(() => false)) continue;
-      if (await button.isDisabled().catch(() => true)) continue;
-      await button.click({ timeout: 5000 });
-      return;
-    }
-  }
-  await page.keyboard.press("Enter");
+  // The selector stores the exact composer that committed the GitHub mention.
+  // Reusing it avoids the ChatGPT editor turning the mention into plain text
+  // or dropping the chip when focus is moved between two DOM locators.
+  await submitMessageAfterGitHubSelection(page, text);
 };
 
 provider.selectChatGPTApp = async function selectChatGPTApp(page: Page, appName: string): Promise<boolean> {
@@ -117,6 +124,10 @@ provider.selectChatGPTApp = async function selectChatGPTApp(page: Page, appName:
   if (!await isChatGPTPage(page)) return false;
   const selected = await ensureGitHubSelectedV2(page, appName);
   const agent = agentForPage(this, page);
-  if (agent) patchAgent(this, agent.id, selected ? { status: "idle", lastError: "", conversationUrl: page.url() } : { status: "failed", lastError: "GitHub App initialization failed", conversationUrl: page.url() });
+  if (agent) {
+    patchAgent(this, agent.id, selected
+      ? { status: "idle", lastError: "", conversationUrl: page.url() }
+      : { status: "failed", lastError: "GitHub App initialization failed", conversationUrl: page.url() });
+  }
   return selected;
 };
