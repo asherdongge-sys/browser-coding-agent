@@ -2,10 +2,6 @@ import type { Page } from "playwright";
 
 type ComposerLike = ReturnType<Page["locator"]>;
 
-// A page gets exactly one GitHub selection attempt. The previous implementation
-// only deduplicated concurrent calls; the runtime retry loop could therefore
-// type another @GitHub after a failed attempt and eventually navigate into the
-// app detail page.
 const selectionPromises = new WeakMap<Page, Promise<boolean>>();
 const selectionResults = new WeakMap<Page, boolean>();
 
@@ -54,15 +50,26 @@ async function hasAppMention(page: Page, appName: string): Promise<boolean> {
       return style.display !== "none" && style.visibility !== "hidden" && rect.width > 1 && rect.height > 1;
     };
     const nodes = Array.from(document.querySelectorAll<HTMLElement>(
-      "[data-testid*='mention' i], [data-testid*='app' i], [aria-label*='GitHub' i]",
+      "[data-testid*='mention' i], [data-testid*='app' i], [aria-label*='GitHub' i], [role='option']",
     ));
     const re = new RegExp(`(^|\\s|@)${pattern}(\\s|$)`, "i");
     return nodes.some((node) => {
       if (!visible(node)) return false;
       const text = `${node.getAttribute("aria-label") ?? ""} ${node.textContent ?? ""} ${node.getAttribute("data-testid") ?? ""}`;
-      return re.test(text);
+      return re.test(text) && !node.closest("a[href]");
     });
   }, escaped).catch(() => false);
+}
+
+async function hasVisibleGitHubOption(page: Page, appName: string): Promise<boolean> {
+  const candidates = page.getByText(appName, { exact: true });
+  for (let index = (await candidates.count()) - 1; index >= 0; index -= 1) {
+    const candidate = candidates.nth(index);
+    if (!await candidate.isVisible().catch(() => false)) continue;
+    const navigation = await candidate.evaluate((node) => Boolean(node.closest("a[href]"))).catch(() => true);
+    if (!navigation) return true;
+  }
+  return false;
 }
 
 async function cleanComposer(composer: ComposerLike | undefined): Promise<void> {
@@ -73,51 +80,45 @@ async function cleanComposer(composer: ComposerLike | undefined): Promise<void> 
 
 async function selectGitHubInternal(page: Page, appName: string): Promise<boolean> {
   if (!isChatGPTUrl(page)) return false;
-
-  // Wait for ChatGPT's real composer instead of repeatedly retrying the whole
-  // selection flow while the page is still initializing.
   const composer = await waitForComposer(page);
   if (!composer) return false;
 
   const beforeUrl = page.url();
   await composer.click({ timeout: 5000 });
 
-  // Never inject a second mention if the app is already selected.
   if (await hasAppMention(page, appName)) return true;
 
-  // Reliable ChatGPT path: type the mention once, then Space selects it.
   await composer.pressSequentially(`@${appName}`, { delay: 35 });
-  await page.waitForTimeout(350);
-
+  await page.waitForTimeout(400);
   if (!isChatGPTUrl(page)) return false;
   if (await hasAppMention(page, appName)) return true;
 
+  // Space is the primary ChatGPT mention-selection gesture. Treat the action
+  // as committed when ChatGPT remains on the conversation and the suggestion
+  // option disappears; DOM implementations do not always expose a stable
+  // mention test id, but they do consistently remove the active option.
   await composer.press("Space").catch(() => undefined);
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(600);
+  if (!isChatGPTUrl(page)) return false;
+  if (await hasAppMention(page, appName)) return true;
+  if (!await hasVisibleGitHubOption(page, appName)) return true;
 
-  if (isChatGPTUrl(page) && await hasAppMention(page, appName)) return true;
-
-  // Fallback only against visible non-navigation menu items. Never click an
-  // anchor/href because ChatGPT may use those for the app detail page.
-  if (isChatGPTUrl(page)) {
-    const candidates = page.getByText(appName, { exact: true });
-    for (let index = (await candidates.count()) - 1; index >= 0; index -= 1) {
-      const candidate = candidates.nth(index);
-      if (!await candidate.isVisible().catch(() => false)) continue;
-      const isNavigation = await candidate.evaluate((node) => {
-        if (node.closest("a")) return true;
-        if (node.hasAttribute("href")) return true;
-        return Boolean(node.closest("[href]"));
-      }).catch(() => true);
-      if (isNavigation) continue;
-      await candidate.click({ timeout: 2000 }).catch(() => undefined);
-      await page.waitForTimeout(500);
-      if (isChatGPTUrl(page) && await hasAppMention(page, appName)) return true;
-    }
+  // Last-resort click: only a visible non-navigation option is eligible.
+  const candidates = page.getByText(appName, { exact: true });
+  for (let index = (await candidates.count()) - 1; index >= 0; index -= 1) {
+    const candidate = candidates.nth(index);
+    if (!await candidate.isVisible().catch(() => false)) continue;
+    const isNavigation = await candidate.evaluate((node) => {
+      if (node.closest("a[href]")) return true;
+      if (node.hasAttribute("href")) return true;
+      return Boolean(node.closest("[href]"));
+    }).catch(() => true);
+    if (isNavigation) continue;
+    await candidate.click({ timeout: 2000 }).catch(() => undefined);
+    await page.waitForTimeout(500);
+    if (isChatGPTUrl(page) && (await hasAppMention(page, appName) || !await hasVisibleGitHubOption(page, appName))) return true;
   }
 
-  // Selection failed. Do not leave a partially typed @GitHub behind, and do
-  // not let the runtime retry loop type another mention into the same page.
   if (page.url() !== beforeUrl && !isChatGPTUrl(page)) {
     await page.goto(beforeUrl, { waitUntil: "domcontentloaded", timeout: 10000 }).catch(() => undefined);
   }
@@ -128,7 +129,6 @@ async function selectGitHubInternal(page: Page, appName: string): Promise<boolea
 export function ensureGitHubSelected(page: Page, appName = "GitHub"): Promise<boolean> {
   const previousResult = selectionResults.get(page);
   if (previousResult !== undefined) return Promise.resolve(previousResult);
-
   const existing = selectionPromises.get(page);
   if (existing) return existing;
 
@@ -141,9 +141,7 @@ export function ensureGitHubSelected(page: Page, appName = "GitHub"): Promise<bo
       selectionResults.set(page, false);
       return false;
     })
-    .finally(() => {
-      selectionPromises.delete(page);
-    });
+    .finally(() => selectionPromises.delete(page));
 
   selectionPromises.set(page, promise);
   return promise;
