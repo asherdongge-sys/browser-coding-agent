@@ -53,8 +53,8 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
   const emitBrowserEvent = (event: BrowserAgentEvent): void => { if (event.type === "agent.tool.call" || event.type === "agent.tool.result") return; safeBroadcast({ jsonrpc: "2.0", method: "dashboard.event", params: event }, "dashboard"); };
   if (providerKind === "playwright") { browserProvider = new PlaywrightBrowserProvider({ onEvent: emitBrowserEvent }); browserStartup = browserProvider.start().catch((error) => { browserStartupError = error instanceof Error ? error : new Error(String(error)); console.error("[BrowserCodingAgent] Playwright startup failed:", browserStartupError.message); }); }
   const ensureBrowser = async (): Promise<BrowserProvider> => { if (!browserProvider) throw new Error("Playwright browser provider is not enabled"); if (browserStartup) await browserStartup; if (browserStartupError) throw browserStartupError; await browserProvider.start(); return browserProvider; };
-  const initializeGitHubApp = async (provider: BrowserProvider, agentId: string): Promise<void> => {
-    if (provider.kind !== "playwright") return;
+  const initializeGitHubApp = async (provider: BrowserProvider, agentId: string): Promise<boolean> => {
+    if (provider.kind !== "playwright") return false;
     const managed = provider as unknown as { agents?: Map<string, { page?: import("playwright").Page }>; selectChatGPTApp?: (page: import("playwright").Page, appName: string) => Promise<boolean> };
     const deadline = Date.now() + 30000;
     while (Date.now() < deadline) {
@@ -62,21 +62,22 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
       if (!agent?.page || !managed.selectChatGPTApp) { await new Promise((resolve) => setTimeout(resolve, 250)); continue; }
       try {
         const selected = await managed.selectChatGPTApp(agent.page, "GitHub");
-        if (selected) { console.log(`[BrowserCodingAgent] GitHub App initialization for ${agentId}: connected`); return; }
+        if (selected) { console.log(`[BrowserCodingAgent] GitHub App initialization for ${agentId}: connected`); return true; }
       } catch (error) {
         console.warn(`[BrowserCodingAgent] GitHub App initialization retry for ${agentId}:`, error instanceof Error ? error.message : String(error));
       }
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
     console.log(`[BrowserCodingAgent] GitHub App initialization for ${agentId}: not available`);
+    return false;
   };
   const ensureAgentGitHubInitialization = async (provider: BrowserProvider, agentId: string): Promise<void> => {
     if (githubReady.has(agentId)) return;
     const existing = githubInitialization.get(agentId);
     if (existing) { await existing; return; }
-    const task = initializeGitHubApp(provider, agentId).then(() => { githubReady.add(agentId); }).finally(() => { githubInitialization.delete(agentId); });
-    githubInitialization.set(agentId, task);
-    await task;
+    const selected = await initializeGitHubApp(provider, agentId);
+    if (!selected) throw new Error("GitHub App initialization failed");
+    githubReady.add(agentId);
   };
   const stopGitHubMcp = async (): Promise<void> => { const client = githubMcp; githubMcp = undefined; githubMcpTools = []; if (client) await client.stop().catch(() => undefined); };
   const ensureGitHubMcp = async (): Promise<McpStdioClient> => { const connection = await getGitHubConnection(); if (!connection?.accessToken) throw new Error("GitHub is not connected. Connect GitHub first."); if (githubMcp) return githubMcp; if (githubMcpStartup) { await githubMcpStartup; if (githubMcp) return githubMcp; } githubMcpStartup = (async () => { const client = new McpStdioClient(process.execPath, [GITHUB_MCP_SERVER], { GITHUB_ACCESS_TOKEN: connection.accessToken }); await client.start(); githubMcpTools = (await client.listTools()).map((tool) => ({ name: tool.name })); githubMcp = client; })().finally(() => { githubMcpStartup = undefined; }); await githubMcpStartup; if (!githubMcp) throw new Error("GitHub MCP failed to start"); return githubMcp; };
@@ -97,8 +98,8 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
       if (message.method === "runtime.hello") { const role = params.role === "extension" || params.role === "dashboard" ? params.role : "unknown"; roles.set(socket, role); const connection = await getGitHubConnection(); if (role === "dashboard") { const provider = await ensureBrowser(); reply(socket, id, { ok: true, protocol: "0.1", planner: "chatgpt-browser", browserProvider: provider.kind, browserStartupError: browserStartupError?.message, github: { connected: Boolean(connection), login: connection?.login, mcp: "runtime" } }); for (const agent of await provider.listAgents()) safeSend(socket, { jsonrpc: "2.0", method: "dashboard.event", params: { type: "agent.updated", agent } }); } else reply(socket, id, { ok: true, protocol: "0.1", browserProvider: providerKind }); return; }
       if (message.method === "runtime.ping") { reply(socket, id, { ok: true, protocol: "0.1", planner: "chatgpt-browser", browserProvider: providerKind }); return; }
       if (message.method === "agent.list") { const provider = await ensureBrowser(); reply(socket, id, { agents: await provider.listAgents() }); return; }
-      if (message.method === "agent.create") { const provider = await ensureBrowser(); const title = typeof params.title === "string" ? params.title : ""; const prompt = typeof params.prompt === "string" ? params.prompt : ""; const agent = await provider.createAgent(title, ""); const initPromise = initializeGitHubApp(provider, agent.id); githubInitialization.set(agent.id, initPromise.then(() => { githubReady.add(agent.id); }).finally(() => { githubInitialization.delete(agent.id); })); if (prompt.trim()) void initPromise.then(() => provider.sendMessage(agent.id, prompt)).catch((error) => safeBroadcast({ jsonrpc: "2.0", method: "dashboard.event", params: { type: "agent.updated", agent: { id: agent.id, status: "failed", lastError: error instanceof Error ? error.message : String(error), updatedAt: Date.now() } } }, "dashboard")); reply(socket, id, { agent }); return; }
-      if (message.method === "agent.send") { const provider = await ensureBrowser(); const agentId = requiredString(params.agentId, "agentId"); const text = requiredString(params.text, "text"); void (async () => { try { await ensureAgentGitHubInitialization(provider, agentId); await provider.sendMessage(agentId, text); } catch (error) { safeBroadcast({ jsonrpc: "2.0", method: "dashboard.event", params: { type: "agent.updated", agent: { id: agentId, status: "failed", lastError: error instanceof Error ? error.message : String(error), updatedAt: Date.now() } } }, "dashboard"); } })(); reply(socket, id, { ok: true, started: true, mode: "chatgpt" }); return; }
+      if (message.method === "agent.create") { const provider = await ensureBrowser(); const title = typeof params.title === "string" ? params.title : ""; const prompt = typeof params.prompt === "string" ? params.prompt : ""; const agent = await provider.createAgent(title, ""); const initPromise = (async () => { const selected = await initializeGitHubApp(provider, agent.id); if (!selected) throw new Error("GitHub App initialization failed"); githubReady.add(agent.id); })().finally(() => { githubInitialization.delete(agent.id); }); githubInitialization.set(agent.id, initPromise); if (prompt.trim()) void initPromise.then(() => provider.sendMessage(agent.id, prompt)).catch((error) => safeBroadcast({ jsonrpc: "2.0", method: "dashboard.event", params: { type: "agent.updated", agent: { id: agent.id, status: "failed", lastError: error instanceof Error ? error.message : String(error), updatedAt: Date.now() } } }, "dashboard")); reply(socket, id, { agent }); return; }
+      if (message.method === "agent.send") { const provider = await ensureBrowser(); const agentId = requiredString(params.agentId, "agentId"); const text = requiredString(params.text, "text"); void (async () => { try { await ensureAgentGitHubInitialization(provider, agentId); await provider.sendMessage(agentId, text); } catch (error) { safeBroadcast({ jsonrpc: "2.0", method: "dashboard.event", params: { type: "agent.updated", params: { id: agentId, status: "failed", lastError: error instanceof Error ? error.message : String(error), updatedAt: Date.now() } } }, "dashboard"); } })(); reply(socket, id, { ok: true, started: true, mode: "chatgpt" }); return; }
       if (message.method === "agent.resume") { const provider = await ensureBrowser(); const agentId = requiredString(params.agentId, "agentId"); reply(socket, id, { agent: await provider.resumeAgent(agentId) }); return; }
       if (message.method === "workspace.select") { reply(socket, id, { root: workspace.select(requiredString(params.path, "path")) }); return; }
       if (message.method === "workspace.info") { reply(socket, id, { root: safeWorkspaceRoot(workspace) }); return; }
