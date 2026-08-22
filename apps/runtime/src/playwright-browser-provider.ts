@@ -210,31 +210,35 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
   }
 
   private async submitComposer(page: Page, text: string): Promise<void> {
-    const selectors = ["[contenteditable='true']", "textarea", "[role='textbox']"];
-    let composer = page.locator(selectors.join(", ")).first();
+    const composer = page.locator("[contenteditable='true']:visible, textarea:visible, [role='textbox']:visible").last();
     await composer.waitFor({ state: "visible", timeout: 15000 });
     await composer.click();
     await composer.fill(text);
     await page.waitForFunction((expected) => {
       const nodes = Array.from(document.querySelectorAll<HTMLElement>("[contenteditable='true'], textarea, [role='textbox']"));
       return nodes.some((node) => {
+        const style = window.getComputedStyle(node);
+        if (style.display === "none" || style.visibility === "hidden") return false;
         const value = node instanceof HTMLTextAreaElement ? node.value : node.innerText || node.textContent || "";
         return value.trim() === String(expected).trim();
       });
     }, text, { timeout: 5000 });
 
-    const sendCandidates = [
-      'button[data-testid="send-button"]',
-      'button[aria-label*="Send" i]',
-      'button[aria-label*="发送" i]',
-      'button[type="submit"]',
+    const sendSelectors = [
+      'button[data-testid="send-button"]:visible',
+      'button[aria-label*="Send" i]:visible',
+      'button[aria-label*="发送" i]:visible',
+      'button[type="submit"]:visible',
     ];
-    for (const selector of sendCandidates) {
-      const button = page.locator(selector).filter({ visible: true }).last();
-      if (await button.count() === 0) continue;
-      if (await button.isDisabled().catch(() => true)) continue;
-      await button.click();
-      return;
+    for (const selector of sendSelectors) {
+      const buttons = page.locator(selector);
+      const count = await buttons.count();
+      for (let index = count - 1; index >= 0; index -= 1) {
+        const button = buttons.nth(index);
+        if (await button.isDisabled().catch(() => true)) continue;
+        await button.click({ timeout: 5000 });
+        return;
+      }
     }
 
     await composer.press("Enter");
