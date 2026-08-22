@@ -45,9 +45,11 @@ provider.selectChatGPTApp = async function selectChatGPTApp(page: Page, appName:
 const originalCreateAgent = provider.createAgent;
 provider.createAgent = async function createAgent(title: string, prompt: string): Promise<unknown> {
   const agent = await originalCreateAgent.call(this, title, prompt) as { id: string; page: Page };
-  // The native provider starts its initialization asynchronously. Wait for that
-  // lifecycle before returning so agent.create + immediate agent.send cannot race
-  // the ChatGPT tab opening.
+
+  // The native provider initializes asynchronously. Always wait for that
+  // lifecycle first, then attach the default GitHub app before createAgent
+  // resolves. This makes both "send immediately" and "send later" follow the
+  // same ordering: ChatGPT ready -> GitHub selected -> agent ready.
   await provider.resumeAgent.call(this, agent.id).catch(() => undefined);
 
   const self = this as unknown as {
@@ -55,6 +57,19 @@ provider.createAgent = async function createAgent(title: string, prompt: string)
     onEvent?: (event: unknown) => void;
   };
   const managed = self.agents?.get(agent.id) ?? agent;
+
+  if (await isChatGPTPage(managed.page)) {
+    const githubSelected = await ensureGitHubSelectedV2(managed.page, "GitHub").catch(() => false);
+    if (!githubSelected) {
+      const current = self.agents?.get(agent.id);
+      if (current) Object.assign(current, {
+        status: "failed",
+        lastError: "GitHub App could not be selected during agent initialization",
+        updatedAt: Date.now(),
+      });
+    }
+  }
+
   const emit = self.onEvent ?? (() => undefined);
   const patch = (changes: Record<string, unknown>) => {
     const current = self.agents?.get(agent.id);
