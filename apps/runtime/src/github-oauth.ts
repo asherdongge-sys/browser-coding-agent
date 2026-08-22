@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 // Public OAuth client ID. PKCE means no client secret is required for this local/native client.
 export const GITHUB_OAUTH_CLIENT_ID = "Ov23liq1GT66HkGW5Qn9";
+const GITHUB_OAUTH_PLACEHOLDER = "REPLACE_WITH_GITHUB_OAUTH_CLIENT_ID";
 
 export type GitHubConnection = { accessToken: string; login?: string; name?: string; connectedAt: number };
 type OAuthState = { value: string; verifier: string; createdAt: number };
@@ -20,7 +21,7 @@ export async function saveGitHubConnection(connection: GitHubConnection): Promis
   try { await chmod(storeFile, 0o600); } catch {}
 }
 export async function disconnectGitHub(): Promise<void> { try { await writeFile(storeFile, "", "utf8"); } catch {} }
-export function githubOAuthConfigured(): boolean { return GITHUB_OAUTH_CLIENT_ID !== "REPLACE_WITH_GITHUB_OAUTH_CLIENT_ID"; }
+export function githubOAuthConfigured(): boolean { return GITHUB_OAUTH_CLIENT_ID !== GITHUB_OAUTH_PLACEHOLDER; }
 function b64(buffer: Buffer): string { return buffer.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, ""); }
 function verifier(): string { return b64(randomBytes(32)); }
 function challenge(value: string): string { return b64(createHash("sha256").update(value).digest()); }
