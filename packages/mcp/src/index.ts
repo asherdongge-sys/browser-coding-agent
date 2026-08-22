@@ -1,6 +1,15 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
-import type { ToolDescriptor, ToolResult } from "@browser-coding-agent/protocol";
+
+type ToolDescriptor = {
+  readonly name: string;
+  readonly description: string;
+  readonly risk: "read" | "write" | "execute";
+};
+
+type ToolResult<T> =
+  | { readonly ok: true; readonly result: T }
+  | { readonly ok: false; readonly error: string };
 
 export interface McpTool { readonly name: string; readonly description?: string; readonly inputSchema?: unknown; }
 export interface McpServerInfo { readonly name: string; readonly version?: string; }
@@ -13,7 +22,7 @@ export function mcpToolToDescriptor(tool: McpTool): ToolDescriptor {
 }
 
 export class McpStdioClient {
-  private child?: ChildProcessWithoutNullStreams;
+  private child: ChildProcessWithoutNullStreams | undefined;
   private nextId = 0;
   private pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void }>();
   private initialized = false;
@@ -23,15 +32,17 @@ export class McpStdioClient {
   async start(): Promise<McpServerInfo> {
     if (this.child) throw new Error("MCP client already started");
     this.child = spawn(this.command, [...this.args], { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...this.env }, windowsHide: true });
-    const rl = createInterface({ input: this.child.stdout });
+    const child = this.child;
+    const rl = createInterface({ input: child.stdout });
     rl.on("line", (line) => this.handleLine(line));
-    this.child.on("exit", (code, signal) => {
+    child.on("exit", (code, signal) => {
       const error = new Error(`MCP server exited (code=${code ?? "null"}, signal=${signal ?? "null"})`);
       for (const pending of this.pending.values()) pending.reject(error);
       this.pending.clear();
-      this.child = undefined;
+      if (this.child === child) this.child = undefined;
+      this.initialized = false;
     });
-    this.child.stderr.on("data", (chunk) => process.stderr.write(`[MCP] ${chunk.toString()}`));
+    child.stderr.on("data", (chunk) => process.stderr.write(`[MCP] ${chunk.toString()}`));
     const result = await this.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "browser-coding-agent", version: "0.1.0" } });
     this.notify("notifications/initialized", {});
     this.initialized = true;
@@ -52,6 +63,7 @@ export class McpStdioClient {
   async stop(): Promise<void> {
     const child = this.child;
     this.child = undefined;
+    this.initialized = false;
     if (!child) return;
     for (const pending of this.pending.values()) pending.reject(new Error("MCP client stopped"));
     this.pending.clear();
@@ -69,8 +81,9 @@ export class McpStdioClient {
   }
 
   private notify(method: string, params: unknown): void {
-    if (!this.child) return;
-    this.child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method, params }) + "\n");
+    const child = this.child;
+    if (!child) return;
+    child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method, params }) + "\n");
   }
 
   private handleLine(line: string): void {
