@@ -230,8 +230,13 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
   private async waitForTurnIdle(page: Page): Promise<void> {
     await page.waitForFunction(() => {
       const stopButton = document.querySelector('button[data-testid="stop-button"], button[aria-label*="Stop generating" i], button[aria-label*="停止" i]');
-      const sendButton = document.querySelector('button[data-testid="send-button"], button[aria-label*="Send" i], button[aria-label*="发送" i]');
-      return !stopButton && Boolean(sendButton);
+      if (stopButton) return false;
+      const composer = document.querySelector<HTMLElement>("[contenteditable='true'], textarea, [role='textbox']");
+      if (!composer) return false;
+      const disabled = composer instanceof HTMLInputElement || composer instanceof HTMLTextAreaElement
+        ? composer.disabled
+        : composer.getAttribute("aria-disabled") === "true" || composer.getAttribute("contenteditable") === "false";
+      return !disabled;
     }, undefined, { timeout: TURN_IDLE_TIMEOUT_MS });
   }
 
@@ -242,16 +247,25 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     await page.waitForTimeout(300);
     const sendButton = page.locator('button[data-testid="send-button"], button[aria-label*="Send" i], button[aria-label*="发送" i], button[type="submit"]').first();
     if (await sendButton.isVisible().catch(() => false)) {
-      await sendButton.click();
-      return;
+      const disabled = await sendButton.isDisabled().catch(() => false);
+      if (!disabled) {
+        await sendButton.click();
+        return;
+      }
     }
     await composer.press("Enter");
   }
 
   private async latestAssistant(page: Page): Promise<AssistantSnapshot> {
     return page.evaluate(() => {
-      const nodes = Array.from(document.querySelectorAll<HTMLElement>("[data-message-author-role='assistant']"));
-      const texts = nodes.map((node) => node.innerText.trim()).filter(Boolean);
+      const selectors = [
+        "[data-message-author-role='assistant']",
+        "article[data-testid^='conversation-turn'] [data-message-author-role='assistant']",
+        "[data-testid^='conversation-turn'] [data-message-author-role='assistant']",
+      ];
+      const nodes = selectors.flatMap((selector) => Array.from(document.querySelectorAll<HTMLElement>(selector)));
+      const unique = [...new Set(nodes)];
+      const texts = unique.map((node) => node.innerText.trim()).filter(Boolean);
       return { text: texts.at(-1) ?? "", count: texts.length };
     });
   }
