@@ -15,6 +15,7 @@
     }
   },
   "dependencies": {
-    "@browser-coding-agent/protocol": "workspace:*"
+    "@browser-coding-agent/protocol": "workspace:*",
+    "@browser-coding-agent/workspace": "workspace:*"
   }
 }
