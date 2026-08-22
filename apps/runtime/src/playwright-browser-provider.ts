@@ -18,6 +18,7 @@ type ManagedAgent = BrowserAgent & { page: Page };
 export class PlaywrightBrowserProvider implements BrowserProvider {
   readonly kind = "playwright" as const;
   private context: BrowserContext | undefined;
+  private dashboardPage: Page | undefined;
   private startPromise: Promise<void> | undefined;
   private stopping = false;
   private readonly agents = new Map<string, ManagedAgent>();
@@ -48,6 +49,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
   async createAgent(title: string, prompt: string): Promise<BrowserAgent> {
     await this.start();
     if (this.stopping || !this.context) throw new Error("Browser provider is not running");
+
     const page = await this.context.newPage();
     this.observePage(page);
     const normalizedPrompt = prompt.trim();
@@ -60,8 +62,10 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
       updatedAt: Date.now(),
       page,
     };
+
     this.agents.set(agent.id, agent);
     this.emit({ type: "agent.created", agent: this.publicAgent(agent) });
+    await this.keepDashboardForeground();
     void this.initializeAgent(agent);
     return this.publicAgent(agent);
   }
@@ -70,12 +74,14 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     const agent = this.agents.get(agentId);
     if (!agent) throw new Error(`Agent ${agentId} not found`);
     await this.send(agent, text);
+    await this.keepDashboardForeground();
   }
 
   async resumeAgent(agentId: string): Promise<BrowserAgent> {
     const agent = this.agents.get(agentId);
     if (!agent) throw new Error(`Agent ${agentId} not found`);
     await this.initializeAgent(agent);
+    await this.keepDashboardForeground();
     return this.publicAgent(agent);
   }
 
@@ -83,6 +89,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     this.stopping = true;
     const context = this.context;
     this.context = undefined;
+    this.dashboardPage = undefined;
     this.agents.clear();
     if (context) {
       try { await context.close(); }
@@ -111,12 +118,10 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     const pages = context.pages();
     const startupPage = pages[0] ?? await context.newPage();
     this.observePage(startupPage);
-
-    // The first tab is always the local Dashboard. ChatGPT tabs belong to
-    // individual agents and are created only after the user creates an agent.
+    this.dashboardPage = startupPage;
     await this.openDashboard(startupPage);
-
     for (const page of context.pages()) if (page !== startupPage) this.observePage(page);
+    await this.keepDashboardForeground();
   }
 
   private async openDashboard(page: Page): Promise<void> {
@@ -133,6 +138,12 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
         await new Promise((resolve) => setTimeout(resolve, 250));
       }
     }
+  }
+
+  private async keepDashboardForeground(): Promise<void> {
+    const dashboard = this.dashboardPage;
+    if (!dashboard || dashboard.isClosed() || this.headless || this.stopping) return;
+    try { await dashboard.bringToFront(); } catch { /* browser may be shutting down */ }
   }
 
   private async initializeAgent(agent: ManagedAgent): Promise<void> {
@@ -156,6 +167,8 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
       }
     } catch (error) {
       if (!this.stopping) this.patch(agent, { status: "failed", lastError: error instanceof Error ? error.message : String(error) });
+    } finally {
+      await this.keepDashboardForeground();
     }
   }
 
@@ -237,6 +250,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
 
   private observePage(page: Page): void {
     page.on("close", () => {
+      if (this.dashboardPage === page) this.dashboardPage = undefined;
       for (const agent of this.agents.values()) if (agent.page === page) {
         this.patch(agent, { status: "tab-closed", lastError: "浏览器页面已关闭" });
       }
