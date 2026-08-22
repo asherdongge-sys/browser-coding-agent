@@ -73,8 +73,20 @@ export class BrowserTaskExecutor {
         case "browser.navigate": {
           const url = String(call.arguments.url ?? "").trim();
           if (!/^https?:\/\//i.test(url)) return { ok: false, error: "browser.navigate requires an http(s) URL" };
-          await this.page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
-          return { ok: true, result: { url: this.page.url() } };
+          let lastError: unknown;
+          for (let attempt = 1; attempt <= 3; attempt += 1) {
+            try {
+              await this.page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+              return { ok: true, result: { url: this.page.url() } };
+            } catch (error) {
+              lastError = error;
+              const message = error instanceof Error ? error.message : String(error);
+              const transientTls = /ERR_SSL_PROTOCOL_ERROR|ERR_CONNECTION_RESET|ERR_CONNECTION_CLOSED|ERR_NETWORK_CHANGED/i.test(message);
+              if (!transientTls || attempt === 3) break;
+              await this.page.waitForTimeout(500 * attempt);
+            }
+          }
+          return { ok: false, error: lastError instanceof Error ? lastError.message : String(lastError) };
         }
         case "browser.search": {
           const query = String(call.arguments.query ?? "").trim();
