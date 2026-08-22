@@ -16,6 +16,7 @@ export type PlaywrightBrowserProviderOptions = {
 
 type ManagedAgent = BrowserAgent & { page: Page };
 type AssistantSnapshot = { text: string; count: number };
+type UserSnapshot = { text: string; count: number };
 
 export class PlaywrightBrowserProvider implements BrowserProvider {
   readonly kind = "playwright" as const;
@@ -187,15 +188,20 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     }
 
     await this.waitForTurnIdle(agent.page);
-    const previous = await this.latestAssistant(agent.page);
+    const previousAssistant = await this.latestAssistant(agent.page);
+    const previousUser = await this.latestUser(agent.page);
     this.patch(agent, { status: "sending", lastError: "" });
-    await this.keepDashboardForeground();
     this.emit({ type: "agent.message", agentId: agent.id, role: "user", text, url: agent.page.url() });
+
     await this.fillComposer(agent.page, text);
     await this.keepDashboardForeground();
     this.patch(agent, { status: "waiting", conversationUrl: agent.page.url() });
 
-    const response = await this.waitForAssistant(agent.page, previous);
+    // Do not start waiting for the assistant until ChatGPT has actually accepted
+    // the user turn. This is important for turn #2+: a filled composer by itself
+    // does not mean the message was submitted.
+    await this.waitForUserTurn(agent.page, previousUser, text);
+    const response = await this.waitForAssistant(agent.page, previousAssistant);
     await this.waitForTurnIdle(agent.page);
     this.emit({ type: "agent.message", agentId: agent.id, role: "assistant", text: response, url: agent.page.url() });
     this.patch(agent, { status: "idle", conversationUrl: agent.page.url(), lastError: "" });
@@ -241,18 +247,31 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
   }
 
   private async fillComposer(page: Page, text: string): Promise<void> {
-    const composer = page.locator("[contenteditable='true'], textarea, [role='textbox']").first();
+    const composer = page.locator("[contenteditable='true'], textarea, [role='textbox']").filter({ visible: true }).first();
     await composer.waitFor({ state: "visible", timeout: 15000 });
+    await composer.click();
     await composer.fill(text);
-    await page.waitForTimeout(300);
-    const sendButton = page.locator('button[data-testid="send-button"], button[aria-label*="Send" i], button[aria-label*="发送" i], button[type="submit"]').first();
-    if (await sendButton.isVisible().catch(() => false)) {
+
+    // React/ProseMirror can update asynchronously. Verify that the text really
+    // reached the live composer before trying to submit it.
+    await page.waitForFunction((expected) => {
+      const node = document.querySelector<HTMLElement>("[contenteditable='true'], textarea, [role='textbox']");
+      if (!node) return false;
+      const value = node instanceof HTMLTextAreaElement ? node.value : node.innerText || node.textContent || "";
+      return value.trim() === String(expected).trim();
+    }, text, { timeout: 5000 });
+
+    const sendButton = page.locator('button[data-testid="send-button"], button[aria-label*="Send" i], button[aria-label*="发送" i], button[type="submit"]').filter({ visible: true }).first();
+    if (await sendButton.count() > 0) {
       const disabled = await sendButton.isDisabled().catch(() => false);
       if (!disabled) {
         await sendButton.click();
         return;
       }
     }
+
+    // ChatGPT's current UI reliably submits the composer with Enter when the
+    // send button is not exposed. Use a real keyboard event, then verify below.
     await composer.press("Enter");
   }
 
@@ -268,6 +287,30 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
       const texts = unique.map((node) => node.innerText.trim()).filter(Boolean);
       return { text: texts.at(-1) ?? "", count: texts.length };
     });
+  }
+
+  private async latestUser(page: Page): Promise<UserSnapshot> {
+    return page.evaluate(() => {
+      const selectors = [
+        "[data-message-author-role='user']",
+        "article[data-testid^='conversation-turn'] [data-message-author-role='user']",
+        "[data-testid^='conversation-turn'] [data-message-author-role='user']",
+      ];
+      const nodes = selectors.flatMap((selector) => Array.from(document.querySelectorAll<HTMLElement>(selector)));
+      const unique = [...new Set(nodes)];
+      const texts = unique.map((node) => node.innerText.trim()).filter(Boolean);
+      return { text: texts.at(-1) ?? "", count: texts.length };
+    });
+  }
+
+  private async waitForUserTurn(page: Page, previous: UserSnapshot, expected: string): Promise<void> {
+    const started = Date.now();
+    while (Date.now() - started < 15000) {
+      const current = await this.latestUser(page);
+      if (current.count > previous.count || current.text === expected.trim()) return;
+      await page.waitForTimeout(250);
+    }
+    throw new Error("ChatGPT did not accept the user message");
   }
 
   private async waitForAssistant(page: Page, previous: AssistantSnapshot): Promise<string> {
