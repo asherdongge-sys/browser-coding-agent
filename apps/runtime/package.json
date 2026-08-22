@@ -6,8 +6,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "dev": "tsx src/server.ts",
-    "start": "node dist/server.js"
+    "dev": "tsx --import ./src/playwright-composer-fix.ts src/server.ts",
+    "start": "node --import ./dist/playwright-composer-fix.js dist/server.js"
   },
   "dependencies": {
     "@browser-coding-agent/agent-core": "workspace:*",
