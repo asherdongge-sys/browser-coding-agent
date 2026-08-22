@@ -28,9 +28,11 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
   const roles = new Map<WebSocket, "extension" | "dashboard" | "unknown">();
   const forwarded = new Map<string, WebSocket>();
   const sessionAllowed = new Set<string>();
-  const providerKind = process.env.BROWSER_PROVIDER === "playwright" ? "playwright" : "extension";
+  const configuredProvider = (process.env.BROWSER_PROVIDER ?? "playwright").trim().toLowerCase();
+  const providerKind = configuredProvider === "extension" ? "extension" : "playwright";
   let browserProvider: BrowserProvider | undefined;
   let browserStartup: Promise<void> | undefined;
+  let browserStartupError: Error | undefined;
   let shuttingDown = false;
   for (const tool of [...createFilesystemTools(workspace), ...createTerminalTools(workspace)]) tools.register(tool);
 
@@ -43,7 +45,10 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
 
   if (providerKind === "playwright") {
     browserProvider = new PlaywrightBrowserProvider({ onEvent: emitBrowserEvent });
-    browserStartup = browserProvider.start().catch((error) => console.error("[BrowserCodingAgent] Playwright startup failed:", error));
+    browserStartup = browserProvider.start().catch((error) => {
+      browserStartupError = error instanceof Error ? error : new Error(String(error));
+      console.error("[BrowserCodingAgent] Playwright startup failed:", browserStartupError.message);
+    });
   }
 
   const executeTool = <TArguments = unknown, TResult = unknown>(call: ToolCall<TArguments>, requester?: WebSocket, requestId?: string | number): Promise<ToolResult<TResult>> => {
@@ -105,8 +110,11 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
       if ("method" in message && (message.method === "agent.list" || message.method === "agent.create" || message.method === "agent.send" || message.method === "agent.resume")) {
         const id = "id" in message ? message.id : undefined;
         if (id === undefined) return;
-        if (browserProvider) {
+        if (providerKind === "playwright") {
+          if (!browserProvider) { reply(socket, id, undefined, { code: -32011, message: "Playwright browser provider is not initialized" }); return; }
+          if (browserStartupError) { reply(socket, id, undefined, { code: -32011, message: `Playwright browser provider failed to start: ${browserStartupError.message}` }); return; }
           try {
+            await browserStartup;
             const params = asRecord(message.params);
             if (message.method === "agent.list") { reply(socket, id, { agents: await browserProvider.listAgents() }); return; }
             if (message.method === "agent.create") { reply(socket, id, { agent: await browserProvider.createAgent(typeof params.title === "string" ? params.title : "", typeof params.prompt === "string" ? params.prompt : "") }); return; }
@@ -114,6 +122,7 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
             if (message.method === "agent.resume") { reply(socket, id, { ok: true, agent: await browserProvider.resumeAgent(requiredString(params.agentId, "agentId")) }); return; }
           } catch (error) { reply(socket, id, undefined, { code: -32000, message: error instanceof Error ? error.message : String(error) }); return; }
         }
+
         const extension = [...clients].find((client) => roles.get(client) === "extension");
         if (!extension) { reply(socket, id, undefined, { code: -32010, message: "Browser extension is not connected" }); return; }
         forwarded.set(String(id), socket);
@@ -192,4 +201,4 @@ function reply(socket: WebSocket, id: string | number | undefined, result?: unkn
 
 const runtime = createRuntimeServer();
 runtime.installSignalHandlers();
-runtime.httpServer.listen(runtime.port, "127.0.0.1", () => console.log(`Browser Coding Agent runtime listening on http://127.0.0.1:${runtime.port}`));
+runtime.httpServer.listen(runtime.port, "127.0.0.1", () => console.log(`Browser Coding Agent runtime listening on http://127.0.0.1:${runtime.port} (browser provider: ${process.env.BROWSER_PROVIDER ?? "playwright"})`));
