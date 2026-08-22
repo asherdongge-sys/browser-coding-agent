@@ -8,6 +8,7 @@ import { PermissionManager } from "@browser-coding-agent/permissions";
 import { ToolRegistry, WorkspaceManager, createFilesystemTools, createTerminalTools } from "@browser-coding-agent/tools";
 import type { BrowserAgentEvent, BrowserProvider } from "./browser-provider.js";
 import { PlaywrightBrowserProvider } from "./playwright-browser-provider.js";
+import { completeGitHubOAuth, createGitHubAuthorizeUrl, disconnectGitHub, getGitHubConnection, githubOAuthCallbackUrl, githubOAuthStatus } from "./github-oauth.js";
 
 export const DEFAULT_PORT = 4317;
 type PendingApproval = { socket: WebSocket | undefined; id: string | number | undefined; call: ToolCall; toolName: string; resolve: (result: ToolResult<unknown>) => void };
@@ -80,15 +81,41 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
     return [];
   };
 
+  const sendJson = (response: import("node:http").ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void => {
+    response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...headers });
+    response.end(JSON.stringify(body));
+  };
+
   const httpServer = createServer(async (request, response) => {
-    if (shuttingDown) { response.writeHead(503, { "content-type": "application/json" }); response.end(JSON.stringify({ ok: false, error: "Runtime is shutting down" })); return; }
-    if (request.url === "/" || request.url === "/index.html") {
+    if (shuttingDown) { sendJson(response, 503, { ok: false, error: "Runtime is shutting down" }); return; }
+    const requestUrl = new URL(request.url ?? "/", `http://127.0.0.1:${port}`);
+    if (requestUrl.pathname === "/" || requestUrl.pathname === "/index.html") {
       try { const html = await readFile(DASHBOARD_FILE, "utf8"); response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }); response.end(html); }
       catch (error) { response.writeHead(500, { "content-type": "text/plain; charset=utf-8" }); response.end(error instanceof Error ? error.message : String(error)); }
       return;
     }
-    response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({ name: "browser-coding-agent", protocol: "0.1", workspace: safeWorkspaceRoot(workspace), clients: clients.size, dashboards: [...roles.values()].filter((role) => role === "dashboard").length, extensions: [...roles.values()].filter((role) => role === "extension").length, browserProvider: providerKind, planner: "chatgpt-browser" }));
+    if (requestUrl.pathname === "/api/github/status") { sendJson(response, 200, githubOAuthStatus(port, await getGitHubConnection())); return; }
+    if (requestUrl.pathname === "/api/github/connect") {
+      try {
+        const callback = githubOAuthCallbackUrl(port);
+        const authorizeUrl = createGitHubAuthorizeUrl(callback);
+        response.writeHead(302, { location: authorizeUrl, "cache-control": "no-store" }); response.end();
+      } catch (error) { sendJson(response, 500, { ok: false, error: error instanceof Error ? error.message : String(error) }); }
+      return;
+    }
+    if (requestUrl.pathname === "/api/github/callback") {
+      const error = requestUrl.searchParams.get("error");
+      if (error) { response.writeHead(302, { location: `/?github=error&message=${encodeURIComponent(error)}` }); response.end(); return; }
+      try {
+        const code = requestUrl.searchParams.get("code"); const state = requestUrl.searchParams.get("state");
+        if (!code || !state) throw new Error("GitHub OAuth callback is missing code or state");
+        const connection = await completeGitHubOAuth(code, state);
+        response.writeHead(302, { location: `/?github=connected&login=${encodeURIComponent(connection.login ?? "")}` }); response.end();
+      } catch (oauthError) { response.writeHead(302, { location: `/?github=error&message=${encodeURIComponent(oauthError instanceof Error ? oauthError.message : String(oauthError))}` }); response.end(); }
+      return;
+    }
+    if (requestUrl.pathname === "/api/github/disconnect" && request.method === "POST") { await disconnectGitHub(); sendJson(response, 200, { ok: true }); return; }
+    sendJson(response, 200, { name: "browser-coding-agent", protocol: "0.1", workspace: safeWorkspaceRoot(workspace), clients: clients.size, dashboards: [...roles.values()].filter((role) => role === "dashboard").length, extensions: [...roles.values()].filter((role) => role === "extension").length, browserProvider: providerKind, planner: "chatgpt-browser" });
   });
   const wsServer = new WebSocketServer({ server: httpServer });
 
