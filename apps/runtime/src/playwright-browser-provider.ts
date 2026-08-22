@@ -2,6 +2,7 @@ import { chromium, type BrowserContext, type Page } from "playwright";
 import type { BrowserAgent, BrowserAgentEvent, BrowserProvider } from "./browser-provider.js";
 
 const CHATGPT_URL = "https://chatgpt.com/";
+const DASHBOARD_URL = process.env.BROWSER_CODING_AGENT_DASHBOARD_URL ?? "http://127.0.0.1:4317/";
 const RESPONSE_TIMEOUT_MS = 120000;
 const STABILITY_MS = 1000;
 
@@ -96,8 +97,6 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     const launchOptions = {
       headless: this.headless,
       viewport: { width: 1440, height: 900 },
-      // Playwright adds --no-sandbox by default. Google may reject login when
-      // the stable browser is launched with this unsupported command-line flag.
       ignoreDefaultArgs: ["--no-sandbox"],
       ...(this.executablePath ? { executablePath: this.executablePath } : {}),
     };
@@ -108,13 +107,32 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
       this.context = undefined;
       throw new Error("Browser provider stopped during startup");
     }
+
     const pages = context.pages();
     const startupPage = pages[0] ?? await context.newPage();
     this.observePage(startupPage);
-    if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(startupPage.url())) {
-      await startupPage.goto(CHATGPT_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
-    }
+
+    // The first tab is always the local Dashboard. ChatGPT tabs belong to
+    // individual agents and are created only after the user creates an agent.
+    await this.openDashboard(startupPage);
+
     for (const page of context.pages()) if (page !== startupPage) this.observePage(page);
+  }
+
+  private async openDashboard(page: Page): Promise<void> {
+    const maxAttempts = 20;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      if (this.stopping) throw new Error("Browser provider is stopping");
+      try {
+        if (page.url() !== DASHBOARD_URL) {
+          await page.goto(DASHBOARD_URL, { waitUntil: "domcontentloaded", timeout: 3000 });
+        }
+        return;
+      } catch (error) {
+        if (attempt === maxAttempts) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    }
   }
 
   private async initializeAgent(agent: ManagedAgent): Promise<void> {
