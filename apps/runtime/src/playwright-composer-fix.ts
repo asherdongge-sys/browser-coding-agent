@@ -9,8 +9,9 @@ type ProviderPrototype = {
   resumeAgent(agentId: string): Promise<unknown>;
   initializeAgent(agent: Managed): Promise<void>;
   stop(): Promise<void>;
-  submitComposer(page: Page, text: string): Promise<void>;
+  submitComposerAfterAppSelection(page: Page, text: string): Promise<void>;
   selectChatGPTApp(page: Page, appName: string): Promise<boolean>;
+  emit(event: any): void;
   agents?: Map<string, Managed>;
   initialization?: Map<string, Promise<void>>;
   onEvent?: (event: unknown) => void;
@@ -18,6 +19,8 @@ type ProviderPrototype = {
 
 const provider = PlaywrightBrowserProvider.prototype as unknown as ProviderPrototype;
 const nativeCreateAgent = provider.createAgent;
+const nativeSubmitComposerAfterAppSelection = provider.submitComposerAfterAppSelection;
+const nativeEmit = provider.emit;
 
 async function findComposer(page: Page) {
   const selectors = ["[contenteditable='true']:not([aria-hidden='true'])","textarea[name='prompt-textarea']:not(.wcDTda_fallbackTextarea)","textarea:not(.wcDTda_fallbackTextarea)","[role='textbox']:not([aria-hidden='true'])"];
@@ -45,6 +48,15 @@ function patchAgent(self: unknown, agentId: string, changes: Record<string, unkn
   Object.assign(agent, changes, { updatedAt: Date.now() });
   target.onEvent?.({ type: "agent.updated", agent: { ...agent } });
 }
+
+provider.emit = function emit(event: any): void {
+  // The native provider already maintains the assistant message while ChatGPT
+  // streams. The page sync publishes the final stable manual/assistant turn.
+  // Suppress native streaming events so the dashboard cannot render each DOM
+  // fragment as a separate assistant message.
+  if (event?.streaming === true) return;
+  nativeEmit.call(this, event);
+};
 
 provider.createAgent = async function createAgent(title: string, prompt: string): Promise<unknown> {
   const self = this as unknown as ProviderPrototype;
@@ -77,13 +89,36 @@ provider.initializeAgent = async function initializeAgent(agent: Managed): Promi
       return;
     }
     patchAgent(this, agent.id, { status: "idle", conversationUrl: agent.page.url(), lastError: "" });
-    const target = this as unknown as { onEvent?: (event: unknown) => void; patch?: (agent: Managed, changes: Record<string, unknown>) => void };
+    const target = this as unknown as { onEvent?: (event: unknown) => void };
     const emit = target.onEvent as ((event: any) => void) | undefined;
     const patch = (changes: Partial<Managed>) => patchAgent(this, agent.id, changes as Record<string, unknown>);
     if (emit) await startChatGPTPageSync(agent as unknown as any, agent.page, emit as any, patch as any);
   } catch (error) {
     patchAgent(this, agent.id, { status: "failed", lastError: error instanceof Error ? error.message : String(error), conversationUrl: agent.page.url() });
   }
+};
+
+provider.submitComposerAfterAppSelection = async function submitComposerAfterAppSelection(page: Page, text: string): Promise<void> {
+  const composer = await findComposer(page);
+  if (!composer) throw new Error("ChatGPT composer is not visible after selecting GitHub");
+  // Do not click the composer here. ChatGPT app mentions are represented as a
+  // special inline token, and clicking can move the caret to the wrong node or
+  // cause the token to be discarded. Preserve the focus created by Space.
+  await composer.focus({ timeout: 5000 });
+  const active = await page.evaluate(() => document.activeElement?.matches("[contenteditable='true'], textarea, [role='textbox']") ?? false).catch(() => false);
+  if (!active) throw new Error("ChatGPT composer lost focus after selecting GitHub");
+  await page.keyboard.type(text, { delay: 5 });
+  for (const selector of ['button[data-testid="send-button"]', 'button[aria-label*="Send" i]', 'button[aria-label*="发送" i]', 'button[type="submit"]']) {
+    const buttons = page.locator(selector);
+    for (let index = await buttons.count() - 1; index >= 0; index -= 1) {
+      const button = buttons.nth(index);
+      if (!await button.isVisible().catch(() => false)) continue;
+      if (await button.isDisabled().catch(() => true)) continue;
+      await button.click({ timeout: 5000 });
+      return;
+    }
+  }
+  await page.keyboard.press("Enter");
 };
 
 provider.selectChatGPTApp = async function selectChatGPTApp(page: Page, appName: string): Promise<boolean> {
