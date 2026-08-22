@@ -1,5 +1,3 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
 import { chromium, type BrowserContext, type Page } from "playwright";
 import type { BrowserAgent, BrowserAgentEvent, BrowserAgentMessage, BrowserProvider } from "./browser-provider.js";
 
@@ -8,10 +6,9 @@ const DASHBOARD_URL = process.env.BROWSER_CODING_AGENT_DASHBOARD_URL ?? "http://
 const RESPONSE_TIMEOUT_MS = 120000;
 const STABILITY_MS = 1000;
 
-type ManagedAgent = BrowserAgent & { page: Page; messages: BrowserAgentMessage[] };
+type ManagedAgent = BrowserAgent & { page: Page };
 type AssistantSnapshot = { text: string; count: number };
 type UserSnapshot = { text: string; count: number };
-type PersistedAgent = Omit<BrowserAgent, "messages"> & { messages?: BrowserAgentMessage[] };
 
 export type PlaywrightBrowserProviderOptions = {
   profileDir?: string;
@@ -28,14 +25,12 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
   private stopping = false;
   private readonly agents = new Map<string, ManagedAgent>();
   private readonly profileDir: string;
-  private readonly stateFile: string;
   private readonly headless: boolean;
   private readonly executablePath: string | undefined;
   private readonly onEvent: ((event: BrowserAgentEvent) => void) | undefined;
 
   constructor(options: PlaywrightBrowserProviderOptions = {}) {
     this.profileDir = options.profileDir ?? process.env.BROWSER_CODING_AGENT_PROFILE ?? ".browser-coding-agent/chromium";
-    this.stateFile = join(this.profileDir, "agents.json");
     this.headless = options.headless ?? process.env.BROWSER_CODING_AGENT_HEADLESS === "1";
     this.executablePath = options.executablePath ?? (process.env.BROWSER_EXECUTABLE?.trim() || undefined);
     this.onEvent = options.onEvent;
@@ -50,7 +45,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
   }
 
   async listAgents(): Promise<BrowserAgent[]> {
-    return [...this.agents.values()].map((agent) => this.publicAgent(agent));
+    return [...this.agents.values()].map(({ page: _page, ...agent }) => agent);
   }
 
   async createAgent(title: string, prompt: string): Promise<BrowserAgent> {
@@ -59,21 +54,18 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     const page = await this.context.newPage();
     this.observePage(page);
     const normalizedPrompt = prompt.trim();
-    const now = Date.now();
     const agent: ManagedAgent = {
       id: crypto.randomUUID(),
       title: title.trim() || `Agent ${new Date().toLocaleTimeString()}`,
       ...(normalizedPrompt ? { prompt: normalizedPrompt } : {}),
       status: "opening-chatgpt",
-      createdAt: now,
-      updatedAt: now,
-      page,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
       messages: [],
+      page,
     };
     this.agents.set(agent.id, agent);
-    await this.persist();
     this.emit({ type: "agent.created", agent: this.publicAgent(agent) });
-    await this.keepDashboardForeground();
     void this.initializeAgent(agent);
     return this.publicAgent(agent);
   }
@@ -82,34 +74,27 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     const agent = this.agents.get(agentId);
     if (!agent) throw new Error(`Agent ${agentId} not found`);
     await this.send(agent, text);
-    await this.keepDashboardForeground();
   }
 
   async resumeAgent(agentId: string): Promise<BrowserAgent> {
     const agent = this.agents.get(agentId);
     if (!agent) throw new Error(`Agent ${agentId} not found`);
     await this.initializeAgent(agent);
-    await this.keepDashboardForeground();
     return this.publicAgent(agent);
   }
 
   async stop(): Promise<void> {
     this.stopping = true;
-    await this.persist();
     const context = this.context;
     this.context = undefined;
     this.dashboardPage = undefined;
+    this.agents.clear();
     if (context) {
       try { await context.close(); } catch (error) { console.error("[BrowserCodingAgent] Playwright context close failed:", error); }
-    }
-    if (this.startPromise) {
-      try { await this.startPromise; } catch { /* startup failure already reported */ }
     }
   }
 
   private async startInternal(): Promise<void> {
-    await mkdir(this.profileDir, { recursive: true });
-    const persisted = await this.loadPersisted();
     const context = await chromium.launchPersistentContext(this.profileDir, {
       headless: this.headless,
       viewport: { width: 1440, height: 900 },
@@ -127,43 +112,6 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     this.dashboardPage = startupPage;
     await this.openDashboard(startupPage);
     for (const page of context.pages()) if (page !== startupPage) this.observePage(page);
-    await this.restoreAgents(persisted);
-    await this.keepDashboardForeground();
-  }
-
-  private async restoreAgents(records: PersistedAgent[]): Promise<void> {
-    if (!this.context) return;
-    for (const record of records) {
-      if (!record.id || !record.title) continue;
-      const page = await this.context.newPage();
-      this.observePage(page);
-      const agent: ManagedAgent = {
-        ...record,
-        messages: record.messages ?? [],
-        status: "restoring",
-        updatedAt: Date.now(),
-        page,
-      };
-      this.agents.set(agent.id, agent);
-      this.emit({ type: "agent.updated", agent: this.publicAgent(agent) });
-      void this.initializeAgent(agent);
-    }
-  }
-
-  private async loadPersisted(): Promise<PersistedAgent[]> {
-    try {
-      const raw = await readFile(this.stateFile, "utf8");
-      const value: unknown = JSON.parse(raw);
-      return Array.isArray(value) ? value.filter((item): item is PersistedAgent => Boolean(item && typeof item === "object" && "id" in item)) : [];
-    } catch { return []; }
-  }
-
-  private async persist(): Promise<void> {
-    try {
-      await mkdir(this.profileDir, { recursive: true });
-      const records = [...this.agents.values()].map(({ page: _page, ...agent }) => agent);
-      await writeFile(this.stateFile, JSON.stringify(records, null, 2), "utf8");
-    } catch (error) { console.error("[BrowserCodingAgent] Failed to persist agents:", error); }
   }
 
   private async openDashboard(page: Page): Promise<void> {
@@ -204,7 +152,6 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
         delete agent.prompt;
         await this.send(agent, prompt);
       }
-      await this.persist();
     } catch (error) {
       if (!this.stopping) this.patch(agent, { status: "failed", lastError: error instanceof Error ? error.message : String(error) });
     } finally {
@@ -217,21 +164,21 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     if (!message) throw new Error("Message cannot be empty");
     await this.ensurePageReady(agent);
     if (!await this.isAuthenticated(agent.page)) throw new Error("ChatGPT is not logged in");
+
     const previousAssistant = await this.latestAssistant(agent.page);
     const previousUser = await this.latestUser(agent.page);
     const createdAt = Date.now();
     this.patch(agent, { status: "sending", lastError: "" });
     this.pushMessage(agent, { role: "user", text: message, createdAt });
     this.emit({ type: "agent.message", agentId: agent.id, role: "user", text: message, url: agent.page.url(), createdAt });
+
     await this.submitComposer(agent.page, message);
-    await this.keepDashboardForeground();
     this.patch(agent, { status: "waiting", conversationUrl: agent.page.url() });
     await this.waitForUserTurn(agent.page, previousUser, message);
     const response = await this.waitForAssistant(agent.page, previousAssistant, agent);
     this.finalizeAssistant(agent, response);
     this.patch(agent, { status: "idle", conversationUrl: agent.page.url(), lastError: "" });
     await this.persist();
-    await this.keepDashboardForeground();
   }
 
   private pushMessage(agent: ManagedAgent, message: BrowserAgentMessage): void {
@@ -257,49 +204,93 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
   private async waitForComposerOrLogin(page: Page, timeoutMs: number): Promise<void> {
     await page.waitForFunction(() => {
       const body = document.body?.innerText ?? "";
-      const composer = document.querySelector("[contenteditable='true']:not([aria-hidden='true']), textarea, [role='textbox']");
-      return Boolean(composer) || /log in|sign in|登录|注册/i.test(body) || /\/auth\//i.test(location.pathname);
+      const candidates = Array.from(document.querySelectorAll<HTMLElement>("[contenteditable='true'], textarea, [role='textbox']"));
+      const usable = candidates.some((node) => {
+        const style = getComputedStyle(node);
+        const rect = node.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 20 && rect.height > 10;
+      });
+      return usable || /log in|sign in|登录|注册/i.test(body) || /\/auth\//i.test(location.pathname);
     }, undefined, { timeout: timeoutMs });
   }
 
   private async isAuthenticated(page: Page): Promise<boolean> {
     return page.evaluate(() => {
       if (/\/auth\//i.test(location.pathname) || /\/login/i.test(location.pathname)) return false;
-      return Boolean(document.querySelector("[contenteditable='true']:not([aria-hidden='true']), textarea, [role='textbox']"));
+      return Array.from(document.querySelectorAll<HTMLElement>("[contenteditable='true'], textarea, [role='textbox']")).some((node) => {
+        const style = getComputedStyle(node);
+        const rect = node.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 20 && rect.height > 10;
+      });
     });
   }
 
   private async submitComposer(page: Page, text: string): Promise<void> {
-    const composer = page.locator("[contenteditable='true']:visible, textarea:visible, [role='textbox']:visible").last();
-    await composer.waitFor({ state: "visible", timeout: 15000 });
-    await composer.click();
-    await composer.fill(text);
+    const target = await this.findComposer(page);
+    if (!target) throw new Error("ChatGPT composer is not visible");
+    const { kind, index } = target;
+    const locator = page.locator(kind === "contenteditable" ? "[contenteditable='true']" : kind === "textarea" ? "textarea" : "[role='textbox']").nth(index);
+    await locator.fill(text);
     await page.waitForFunction((expected) => {
-      const nodes = Array.from(document.querySelectorAll<HTMLElement>("[contenteditable='true'], textarea, [role='textbox']"));
-      return nodes.some((node) => {
-        const style = window.getComputedStyle(node);
-        if (style.display === "none" || style.visibility === "hidden") return false;
+      return Array.from(document.querySelectorAll<HTMLElement>("[contenteditable='true'], textarea, [role='textbox']")).some((node) => {
+        const rect = node.getBoundingClientRect();
+        const style = getComputedStyle(node);
+        if (style.display === "none" || style.visibility === "hidden" || rect.width <= 20 || rect.height <= 10) return false;
         const value = node instanceof HTMLTextAreaElement ? node.value : node.innerText || node.textContent || "";
         return value.trim() === String(expected).trim();
       });
     }, text, { timeout: 5000 });
+
     const sendSelectors = [
-      'button[data-testid="send-button"]:visible',
-      'button[aria-label*="Send" i]:visible',
-      'button[aria-label*="发送" i]:visible',
-      'button[type="submit"]:visible',
+      'button[data-testid="send-button"]',
+      'button[aria-label*="Send" i]',
+      'button[aria-label*="发送" i]',
+      'button[type="submit"]',
     ];
     for (const selector of sendSelectors) {
       const buttons = page.locator(selector);
       const count = await buttons.count();
       for (let index = count - 1; index >= 0; index -= 1) {
         const button = buttons.nth(index);
+        if (!await this.isUsableElement(button)) continue;
         if (await button.isDisabled().catch(() => true)) continue;
         await button.click({ timeout: 5000 });
         return;
       }
     }
-    await composer.press("Enter");
+
+    await locator.press("Enter");
+  }
+
+  private async findComposer(page: Page): Promise<{ kind: "contenteditable" | "textarea" | "role"; index: number } | undefined> {
+    return page.evaluate(() => {
+      const groups = [
+        ["[contenteditable='true']", "contenteditable"] as const,
+        ["textarea", "textarea"] as const,
+        ["[role='textbox']", "role"] as const,
+      ];
+      for (const [selector, kind] of groups) {
+        const nodes = Array.from(document.querySelectorAll<HTMLElement>(selector));
+        for (let index = nodes.length - 1; index >= 0; index -= 1) {
+          const node = nodes[index];
+          const style = getComputedStyle(node);
+          const rect = node.getBoundingClientRect();
+          if (style.display !== "none" && style.visibility !== "hidden" && rect.width > 20 && rect.height > 10) {
+            return { kind, index };
+          }
+        }
+      }
+      return undefined;
+    });
+  }
+
+  private async isUsableElement(locator: ReturnType<Page["locator"]>): Promise<boolean> {
+    return locator.evaluate((node) => {
+      const element = node as HTMLElement;
+      const style = getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 1 && rect.height > 1;
+    }).catch(() => false);
   }
 
   private async latestAssistant(page: Page): Promise<AssistantSnapshot> {
@@ -366,17 +357,20 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
 
   private patch(agent: ManagedAgent, patch: Partial<BrowserAgent>): void {
     Object.assign(agent, patch, { updatedAt: Date.now() });
-    void this.persist();
     this.emit({ type: "agent.updated", agent: this.publicAgent(agent) });
     if (patch.status) this.emit({ type: "agent.state", agentId: agent.id, state: patch.status, url: agent.page.url() });
   }
 
   private publicAgent(agent: ManagedAgent): BrowserAgent {
-    const { page: _page, messages, ...rest } = agent;
-    return { ...rest, messages: messages.map((message) => ({ ...message })) };
+    const { page: _page, ...publicAgent } = agent;
+    return publicAgent;
   }
 
   private emit(event: BrowserAgentEvent): void {
     try { this.onEvent?.(event); } catch (error) { console.error("[BrowserCodingAgent] event handler failed:", error); }
+  }
+
+  private async persist(): Promise<void> {
+    // Persistence implementation is supplied by the runtime integration.
   }
 }
