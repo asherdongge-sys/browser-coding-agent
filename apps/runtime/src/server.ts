@@ -54,14 +54,19 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
   const initializeGitHubApp = async (provider: BrowserProvider, agentId: string): Promise<void> => {
     if (provider.kind !== "playwright") return;
     const managed = provider as unknown as { agents?: Map<string, { page?: import("playwright").Page }>; selectChatGPTApp?: (page: import("playwright").Page, appName: string) => Promise<boolean> };
-    const agent = managed.agents?.get(agentId);
-    if (!agent?.page || !managed.selectChatGPTApp) return;
-    try {
-      const selected = await managed.selectChatGPTApp(agent.page, "GitHub");
-      console.log(`[BrowserCodingAgent] GitHub App initialization for ${agentId}: ${selected ? "connected" : "not available"}`);
-    } catch (error) {
-      console.warn(`[BrowserCodingAgent] GitHub App initialization skipped for ${agentId}:`, error instanceof Error ? error.message : String(error));
+    const deadline = Date.now() + 30000;
+    while (Date.now() < deadline) {
+      const agent = managed.agents?.get(agentId);
+      if (!agent?.page || !managed.selectChatGPTApp) { await new Promise((resolve) => setTimeout(resolve, 250)); continue; }
+      try {
+        const selected = await managed.selectChatGPTApp(agent.page, "GitHub");
+        if (selected) { console.log(`[BrowserCodingAgent] GitHub App initialization for ${agentId}: connected`); return; }
+      } catch (error) {
+        console.warn(`[BrowserCodingAgent] GitHub App initialization retry for ${agentId}:`, error instanceof Error ? error.message : String(error));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
     }
+    console.log(`[BrowserCodingAgent] GitHub App initialization for ${agentId}: not available`);
   };
   const stopGitHubMcp = async (): Promise<void> => { const client = githubMcp; githubMcp = undefined; githubMcpTools = []; if (client) await client.stop().catch(() => undefined); };
   const ensureGitHubMcp = async (): Promise<McpStdioClient> => { const connection = await getGitHubConnection(); if (!connection?.accessToken) throw new Error("GitHub is not connected. Connect GitHub first."); if (githubMcp) return githubMcp; if (githubMcpStartup) { await githubMcpStartup; if (githubMcp) return githubMcp; } githubMcpStartup = (async () => { const client = new McpStdioClient(process.execPath, [GITHUB_MCP_SERVER], { GITHUB_ACCESS_TOKEN: connection.accessToken }); await client.start(); githubMcpTools = (await client.listTools()).map((tool) => ({ name: tool.name })); githubMcp = client; })().finally(() => { githubMcpStartup = undefined; }); await githubMcpStartup; if (!githubMcp) throw new Error("GitHub MCP failed to start"); return githubMcp; };
