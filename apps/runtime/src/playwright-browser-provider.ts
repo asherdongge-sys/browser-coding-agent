@@ -176,10 +176,9 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
   private async selectChatGPTApp(page: Page, appName: string): Promise<boolean> {
     const target = await this.findComposer(page);
     if (!target) return false;
-    const composer = page.locator(target.kind === "contenteditable" ? "[contenteditable='true']" : target.kind === "textarea" ? "textarea" : "[role='textbox'"]).nth(target.index);
+    const composer = page.locator(target.kind === "contenteditable" ? "[contenteditable='true']" : target.kind === "textarea" ? "textarea" : "[role='textbox']").nth(target.index);
     if (!await this.isUsableElement(composer)) return false;
 
-    // Preferred path: type @ in the real ChatGPT composer and choose the visible App entry.
     try {
       await composer.click({ timeout: 5000 });
       await composer.pressSequentially("@", { delay: 20 });
@@ -188,7 +187,6 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
       await composer.press("Backspace").catch(() => undefined);
     } catch {}
 
-    // Fallback path: open the +/Add menu and choose the same App.
     const plusSelectors = ['button[aria-label*="Add" i]', 'button[aria-label*="添加" i]', 'button[data-testid*="composer" i]', 'button[data-testid*="attach" i]'];
     for (const selector of plusSelectors) {
       const buttons = page.locator(selector);
@@ -225,7 +223,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
   private async submitComposerAfterAppSelection(page: Page, text: string): Promise<void> {
     const target = await this.findComposer(page);
     if (!target) throw new Error("ChatGPT composer is not visible after selecting GitHub");
-    const composer = page.locator(target.kind === "contenteditable" ? "[contenteditable='true']" : target.kind === "textarea" ? "textarea" : "[role='textbox'"]).nth(target.index);
+    const composer = page.locator(target.kind === "contenteditable" ? "[contenteditable='true']" : target.kind === "textarea" ? "textarea" : "[role='textbox']").nth(target.index);
     if (!await this.isUsableElement(composer)) throw new Error("ChatGPT composer is not usable after selecting GitHub");
     await composer.click({ timeout: 5000 });
     await composer.pressSequentially(text, { delay: 5 });
@@ -235,7 +233,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
   private async submitComposer(page: Page, text: string): Promise<void> {
     const target = await this.findComposer(page);
     if (!target) throw new Error("ChatGPT composer is not visible");
-    const composer = page.locator(target.kind === "contenteditable" ? "[contenteditable='true']" : target.kind === "textarea" ? "textarea" : "[role='textbox'"]).nth(target.index);
+    const composer = page.locator(target.kind === "contenteditable" ? "[contenteditable='true']" : target.kind === "textarea" ? "textarea" : "[role='textbox']").nth(target.index);
     await composer.fill(text);
     await this.clickSendButton(page, composer);
   }
