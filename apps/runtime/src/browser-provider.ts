@@ -6,7 +6,7 @@ export type BrowserAgentMessage = {
   createdAt: number;
 };
 
-export type BrowserToolName = "browser.navigate" | "browser.click" | "browser.type" | "browser.press" | "browser.scroll" | "browser.read_page" | "browser.extract" | "browser.wait";
+export type BrowserToolName = "browser.navigate" | "browser.search" | "browser.click" | "browser.type" | "browser.press" | "browser.scroll" | "browser.read_page" | "browser.extract" | "browser.wait";
 
 export type BrowserToolCall = {
   tool: BrowserToolName;
