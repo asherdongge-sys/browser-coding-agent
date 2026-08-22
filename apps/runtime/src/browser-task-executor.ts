@@ -9,12 +9,8 @@ export class BrowserTaskExecutor {
   async run(goal: string): Promise<string> {
     const normalized = goal.trim();
     if (!normalized) throw new Error("Agent goal must not be empty");
-
     const plan = this.plan(normalized);
-    if (!plan.length) {
-      throw new Error("暂时无法把这个目标转换成浏览器操作。当前版本支持：打开 URL、搜索关键词、点击页面元素、输入文字、按键、滚动、读取页面和提取元素文本。");
-    }
-
+    if (!plan.length) throw new Error("暂时无法把这个目标转换成浏览器操作。当前版本支持：打开 URL、搜索关键词、点击页面元素、输入文字、按键、滚动、读取页面和提取元素文本。");
     const results: string[] = [];
     for (const call of plan) {
       this.onEvent("call", call);
@@ -23,7 +19,6 @@ export class BrowserTaskExecutor {
       if (!result.ok) throw new Error(result.error ?? `Browser tool failed: ${call.tool}`);
       if (result.result !== undefined) results.push(this.stringifyResult(result.result));
     }
-
     return results.filter(Boolean).join("\n\n") || "浏览器任务已完成。";
   }
 
@@ -51,9 +46,7 @@ export class BrowserTaskExecutor {
     const scrollMatch = goal.match(/(?:滚动|scroll)(?:到|向)?\s*(上|下|top|bottom)?/i);
     if (scrollMatch) calls.push({ tool: "browser.scroll", arguments: { direction: /上|top/i.test(scrollMatch[1] ?? "") ? "up" : /bottom/i.test(scrollMatch[1] ?? "") ? "bottom" : "down" } });
 
-    if (/(?:读取|查看|阅读|read|inspect).*(?:页面|网页|page)/i.test(goal) || /页面内容|网页内容/i.test(goal)) {
-      calls.push({ tool: "browser.read_page", arguments: {} });
-    }
+    if (/(?:读取|查看|阅读|read|inspect).*(?:页面|网页|page)/i.test(goal) || /页面内容|网页内容/i.test(goal)) calls.push({ tool: "browser.read_page", arguments: {} });
 
     const extractMatch = goal.match(/(?:提取|extract)\s*[“\"]?([^”\"，。]+)[”\"]?/i);
     if (extractMatch) calls.push({ tool: "browser.extract", arguments: { selector: extractMatch[1].trim() } });
@@ -62,7 +55,6 @@ export class BrowserTaskExecutor {
       const target = goal.replace(/^打开\s+/i, "").trim();
       if (/^https?:\/\//i.test(target)) calls.push({ tool: "browser.navigate", arguments: { url: target } });
     }
-
     return calls;
   }
 
@@ -94,18 +86,17 @@ export class BrowserTaskExecutor {
         case "browser.type": {
           const text = String(call.arguments.text ?? "");
           const selector = typeof call.arguments.selector === "string" ? call.arguments.selector : undefined;
-          if (selector) {
-            const target = this.page.locator(selector).filter({ visible: true }).last();
-            await target.fill(text, { timeout: 10000 });
-          } else {
-            const target = this.page.locator("input:visible, textarea:visible, [contenteditable='true']:visible, [role='textbox']:visible").last();
-            await target.fill(text, { timeout: 10000 });
-          }
+          const target = selector
+            ? this.page.locator(selector).last()
+            : this.page.locator("input:visible, textarea:visible, [contenteditable='true']:visible, [role='textbox']:visible").last();
+          await target.waitFor({ state: "visible", timeout: 10000 });
+          await target.fill(text, { timeout: 10000 });
           return { ok: true, result: { typed: text } };
         }
         case "browser.press": {
           const key = String(call.arguments.key ?? "Enter");
           const target = this.page.locator("input:visible, textarea:visible, [contenteditable='true']:visible, [role='textbox']:visible").last();
+          await target.waitFor({ state: "visible", timeout: 10000 });
           await target.press(key, { timeout: 10000 });
           return { ok: true, result: { key } };
         }
