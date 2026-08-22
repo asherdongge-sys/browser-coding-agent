@@ -177,14 +177,10 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
       const composer = page.locator(target.kind === "contenteditable" ? "[contenteditable='true']" : target.kind === "textarea" ? "textarea" : "[role='textbox']").nth(target.index);
       if (!await this.isUsableElement(composer)) return false;
       await composer.click({ timeout: 5000 });
-      // One continuous @GitHub gesture: never append another @ while the menu is open.
       await composer.pressSequentially(`@${appName}`, { delay: 35 });
       if (await this.waitAndClickApp(page, appName, 4500)) return true;
-      // ChatGPT also accepts the currently highlighted @GitHub suggestion with Space.
       await composer.press("Space").catch(() => undefined);
-      await page.waitForTimeout(350);
-      if (await this.isAppMentionActive(page, appName)) return true;
-      // Last resort: click the first visible GitHub candidate even if it has no semantic menu role.
+      if (await this.waitForAppMentionActive(page, appName, 2500)) return true;
       if (await this.waitAndClickApp(page, appName, 1500)) return true;
       await composer.press("Escape").catch(() => undefined);
       await this.clearComposerMention(composer);
@@ -214,17 +210,24 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
         for (let index = await candidates.count() - 1; index >= 0; index -= 1) {
           const candidate = candidates.nth(index);
           if (!await this.isUsableElement(candidate)) continue;
-          // Do not require a specific role: ChatGPT may render the App suggestion as a div/list item.
           await candidate.click({ timeout: 1500 }).catch(async () => {
-            const parent = candidate.locator("..", { has: candidate }).first();
+            const parent = candidate.locator("..").first();
             if (await this.isUsableElement(parent)) await parent.click({ timeout: 1500 });
             else throw new Error("GitHub candidate is not clickable");
           });
-          await page.waitForTimeout(250);
-          return true;
+          if (await this.waitForAppMentionActive(page, appName, 1800)) return true;
         }
-      } catch { /* page may be navigating or menu may still be rendering; retry */ }
+      } catch { }
       await page.waitForTimeout(150);
+    }
+    return false;
+  }
+
+  private async waitForAppMentionActive(page: Page, appName: string, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (await this.isAppMentionActive(page, appName)) return true;
+      await page.waitForTimeout(120);
     }
     return false;
   }
@@ -233,18 +236,21 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     try {
       return await page.evaluate((name) => {
         const visible = (node: HTMLElement) => { const style = getComputedStyle(node); const rect = node.getBoundingClientRect(); return style.display !== "none" && style.visibility !== "hidden" && rect.width > 1 && rect.height > 1; };
-        const bodyText = document.body?.innerText ?? "";
         const composerNodes = Array.from(document.querySelectorAll<HTMLElement>("[contenteditable='true'], textarea, [role='textbox']"));
         const composer = composerNodes.reverse().find(visible);
-        const value = composer?.textContent ?? (composer as HTMLTextAreaElement | undefined)?.value ?? "";
+        if (!composer) return false;
+        const value = composer.textContent ?? (composer as HTMLTextAreaElement).value ?? "";
+        const html = composer.innerHTML ?? "";
+        const mention = Array.from(composer.querySelectorAll<HTMLElement>("[data-mention], [data-testid*='mention' i], [aria-label*='GitHub' i]")).some(visible);
         const menuStillOpen = Array.from(document.querySelectorAll<HTMLElement>("[role='option'], [role='menuitem'], [role='listbox']")).some(visible);
-        return (value.includes(name) && !value.includes(`@${name}`)) || (!menuStillOpen && bodyText.includes(name));
+        const literalMention = value.includes(`@${name}`) || html.includes(`@${name}`);
+        return mention || (!menuStillOpen && !literalMention && document.activeElement === composer);
       }, appName);
     } catch { return false; }
   }
 
   private async clearComposerMention(composer: ReturnType<Page["locator"]>): Promise<void> {
-    try { await composer.press("Control+A"); await composer.press("Backspace"); } catch { /* best effort */ }
+    try { await composer.press("Control+A"); await composer.press("Backspace"); } catch { }
   }
 
   private async submitComposerAfterAppSelection(page: Page, text: string): Promise<void> {
