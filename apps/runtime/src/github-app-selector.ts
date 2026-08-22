@@ -2,7 +2,12 @@ import type { Page } from "playwright";
 
 type ComposerLike = ReturnType<Page["locator"]>;
 
+// A page gets exactly one GitHub selection attempt. The previous implementation
+// only deduplicated concurrent calls; the runtime retry loop could therefore
+// type another @GitHub after a failed attempt and eventually navigate into the
+// app detail page.
 const selectionPromises = new WeakMap<Page, Promise<boolean>>();
+const selectionResults = new WeakMap<Page, boolean>();
 
 function isChatGPTUrl(page: Page): boolean {
   return /^https:\/\/(chatgpt\.com|chat\.openai\.com)(\/|$)/.test(page.url());
@@ -21,6 +26,17 @@ async function findComposer(page: Page): Promise<ComposerLike | undefined> {
       const candidate = locator.nth(index);
       if (await candidate.isVisible().catch(() => false)) return candidate;
     }
+  }
+  return undefined;
+}
+
+async function waitForComposer(page: Page, timeoutMs = 15000): Promise<ComposerLike | undefined> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!isChatGPTUrl(page)) return undefined;
+    const composer = await findComposer(page);
+    if (composer) return composer;
+    await page.waitForTimeout(250);
   }
   return undefined;
 }
@@ -58,69 +74,77 @@ async function cleanComposer(composer: ComposerLike | undefined): Promise<void> 
 async function selectGitHubInternal(page: Page, appName: string): Promise<boolean> {
   if (!isChatGPTUrl(page)) return false;
 
-  const composer = await findComposer(page);
+  // Wait for ChatGPT's real composer instead of repeatedly retrying the whole
+  // selection flow while the page is still initializing.
+  const composer = await waitForComposer(page);
   if (!composer) return false;
 
   const beforeUrl = page.url();
   await composer.click({ timeout: 5000 });
 
-  // Do not inject a second mention if the app is already selected.
+  // Never inject a second mention if the app is already selected.
   if (await hasAppMention(page, appName)) return true;
 
-  // ChatGPT's reliable selection path is: type @App, then Space.
+  // Reliable ChatGPT path: type the mention once, then Space selects it.
   await composer.pressSequentially(`@${appName}`, { delay: 35 });
-  await page.waitForTimeout(300);
+  await page.waitForTimeout(350);
 
   if (!isChatGPTUrl(page)) return false;
   if (await hasAppMention(page, appName)) return true;
 
   await composer.press("Space").catch(() => undefined);
-  await page.waitForTimeout(350);
+  await page.waitForTimeout(500);
 
   if (isChatGPTUrl(page) && await hasAppMention(page, appName)) return true;
 
-  // Fallback only while the suggestion menu is open. Never click navigation
-  // anchors or anything carrying an href: those can open the app detail page.
-  const candidates = page.getByText(appName, { exact: true });
-  for (let index = (await candidates.count()) - 1; index >= 0; index -= 1) {
-    const candidate = candidates.nth(index);
-    if (!await candidate.isVisible().catch(() => false)) continue;
-
-    const isNavigation = await candidate.evaluate((node) => {
-      if (node.closest("a")) return true;
-      if (node.hasAttribute("href")) return true;
-      const parent = node.closest("[href]");
-      return Boolean(parent);
-    }).catch(() => true);
-    if (isNavigation) continue;
-
-    await candidate.click({ timeout: 2000 }).catch(() => undefined);
-    await page.waitForTimeout(350);
-
-    if (!isChatGPTUrl(page)) break;
-    if (await hasAppMention(page, appName)) return true;
+  // Fallback only against visible non-navigation menu items. Never click an
+  // anchor/href because ChatGPT may use those for the app detail page.
+  if (isChatGPTUrl(page)) {
+    const candidates = page.getByText(appName, { exact: true });
+    for (let index = (await candidates.count()) - 1; index >= 0; index -= 1) {
+      const candidate = candidates.nth(index);
+      if (!await candidate.isVisible().catch(() => false)) continue;
+      const isNavigation = await candidate.evaluate((node) => {
+        if (node.closest("a")) return true;
+        if (node.hasAttribute("href")) return true;
+        return Boolean(node.closest("[href]"));
+      }).catch(() => true);
+      if (isNavigation) continue;
+      await candidate.click({ timeout: 2000 }).catch(() => undefined);
+      await page.waitForTimeout(500);
+      if (isChatGPTUrl(page) && await hasAppMention(page, appName)) return true;
+    }
   }
 
-  // Never consider a disappearing menu to be success. If an accidental click
-  // navigated away, restore the conversation before failing initialization.
+  // Selection failed. Do not leave a partially typed @GitHub behind, and do
+  // not let the runtime retry loop type another mention into the same page.
   if (page.url() !== beforeUrl && !isChatGPTUrl(page)) {
     await page.goto(beforeUrl, { waitUntil: "domcontentloaded", timeout: 10000 }).catch(() => undefined);
   }
-
-  if (isChatGPTUrl(page)) {
-    const currentComposer = await findComposer(page);
-    await cleanComposer(currentComposer);
-  }
+  if (isChatGPTUrl(page)) await cleanComposer(await findComposer(page));
   return false;
 }
 
 export function ensureGitHubSelected(page: Page, appName = "GitHub"): Promise<boolean> {
+  const previousResult = selectionResults.get(page);
+  if (previousResult !== undefined) return Promise.resolve(previousResult);
+
   const existing = selectionPromises.get(page);
   if (existing) return existing;
 
-  const promise = selectGitHubInternal(page, appName).finally(() => {
-    selectionPromises.delete(page);
-  });
+  const promise = selectGitHubInternal(page, appName)
+    .then((result) => {
+      selectionResults.set(page, result);
+      return result;
+    })
+    .catch(() => {
+      selectionResults.set(page, false);
+      return false;
+    })
+    .finally(() => {
+      selectionPromises.delete(page);
+    });
+
   selectionPromises.set(page, promise);
   return promise;
 }
