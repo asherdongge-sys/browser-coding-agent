@@ -3,7 +3,7 @@ import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 // Public OAuth client ID. PKCE means no client secret is required for this local/native client.
-export const GITHUB_OAUTH_CLIENT_ID = "REPLACE_WITH_GITHUB_OAUTH_CLIENT_ID";
+export const GITHUB_OAUTH_CLIENT_ID = "Ov23liq1GT66HkGW5Qn9";
 
 export type GitHubConnection = { accessToken: string; login?: string; name?: string; connectedAt: number };
 type OAuthState = { value: string; verifier: string; createdAt: number };
