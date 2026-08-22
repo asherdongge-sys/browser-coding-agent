@@ -29,27 +29,35 @@ export class BrowserTaskExecutor {
 
     const search = goal.match(/(?:搜索|搜一下|search(?: for)?|google|谷歌|百度)\s*[“\"]?([^”\"，。]+)[”\"]?/i);
     if (search) {
-      const query = search[1].trim();
-      if (!url && /google|谷歌/i.test(goal)) calls.push({ tool: "browser.navigate", arguments: { url: "https://www.google.com/" } });
-      else if (!url && /百度/i.test(goal)) calls.push({ tool: "browser.navigate", arguments: { url: "https://www.baidu.com/" } });
-      calls.push({ tool: "browser.type", arguments: { text: query } });
-      calls.push({ tool: "browser.press", arguments: { key: "Enter" } });
-      calls.push({ tool: "browser.wait", arguments: { ms: 1200 } });
+      const query = search[1]?.trim();
+      if (query) {
+        if (!url && /google|谷歌/i.test(goal)) calls.push({ tool: "browser.navigate", arguments: { url: "https://www.google.com/" } });
+        else if (!url && /百度/i.test(goal)) calls.push({ tool: "browser.navigate", arguments: { url: "https://www.baidu.com/" } });
+        calls.push({ tool: "browser.type", arguments: { text: query } });
+        calls.push({ tool: "browser.press", arguments: { key: "Enter" } });
+        calls.push({ tool: "browser.wait", arguments: { ms: 1200 } });
+      }
     }
 
     const clickMatches = [...goal.matchAll(/(?:点击|单击|click)\s*[“\"]?([^”\"，。]+)[”\"]?/gi)];
-    for (const match of clickMatches) calls.push({ tool: "browser.click", arguments: { text: match[1].trim() } });
+    for (const match of clickMatches) {
+      const text = match[1]?.trim();
+      if (text) calls.push({ tool: "browser.click", arguments: { text } });
+    }
 
     const typeMatch = goal.match(/(?:输入|填写|type|enter)\s*[“\"]([^”\"]+)[”\"]/i);
-    if (typeMatch) calls.push({ tool: "browser.type", arguments: { text: typeMatch[1] } });
+    if (typeMatch?.[1]) calls.push({ tool: "browser.type", arguments: { text: typeMatch[1] } });
 
     const scrollMatch = goal.match(/(?:滚动|scroll)(?:到|向)?\s*(上|下|top|bottom)?/i);
-    if (scrollMatch) calls.push({ tool: "browser.scroll", arguments: { direction: /上|top/i.test(scrollMatch[1] ?? "") ? "up" : /bottom/i.test(scrollMatch[1] ?? "") ? "bottom" : "down" } });
+    if (scrollMatch) {
+      const directionToken = scrollMatch[1] ?? "down";
+      calls.push({ tool: "browser.scroll", arguments: { direction: /上|top/i.test(directionToken) ? "up" : /bottom/i.test(directionToken) ? "bottom" : "down" } });
+    }
 
     if (/(?:读取|查看|阅读|read|inspect).*(?:页面|网页|page)/i.test(goal) || /页面内容|网页内容/i.test(goal)) calls.push({ tool: "browser.read_page", arguments: {} });
 
     const extractMatch = goal.match(/(?:提取|extract)\s*[“\"]?([^”\"，。]+)[”\"]?/i);
-    if (extractMatch) calls.push({ tool: "browser.extract", arguments: { selector: extractMatch[1].trim() } });
+    if (extractMatch?.[1]) calls.push({ tool: "browser.extract", arguments: { selector: extractMatch[1].trim() } });
 
     if (!calls.length && /^打开\s+/i.test(goal)) {
       const target = goal.replace(/^打开\s+/i, "").trim();
