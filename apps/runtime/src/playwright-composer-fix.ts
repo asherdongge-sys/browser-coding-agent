@@ -1,10 +1,15 @@
 import type { Page } from "playwright";
 import { PlaywrightBrowserProvider } from "./playwright-browser-provider.js";
-import { ensureGitHubSelected } from "./github-app-selector.js";
+import { ensureGitHubSelectedV2 } from "./github-app-selector-v2.js";
+import { startChatGPTPageSync, stopChatGPTPageSync } from "./chatgpt-page-sync.js";
 
 type ProviderPrototype = {
+  createAgent(title: string, prompt: string): Promise<unknown>;
+  resumeAgent(agentId: string): Promise<unknown>;
+  stop(): Promise<void>;
   submitComposer(page: Page, text: string): Promise<void>;
   selectChatGPTApp(page: Page, appName: string): Promise<boolean>;
+  agents?: Map<string, { id: string; page: Page; messages?: unknown[] }>;
 };
 
 const provider = PlaywrightBrowserProvider.prototype as unknown as ProviderPrototype;
@@ -28,26 +33,56 @@ async function findComposer(page: Page) {
 
 async function isChatGPTPage(page: Page): Promise<boolean> {
   const url = page.url();
-  return /^https:\/\/(chatgpt\.com|chat\.openai\.com)(\/|$)/.test(url);
+  return /^https:\/\/(chatgpt\.com|chat\.openai\.com)(\/|$)/.test(url) && !/^\/(apps|gpts)(?:\/|$)/i.test(new URL(url).pathname);
 }
 
 provider.selectChatGPTApp = async function selectChatGPTApp(page: Page, appName: string): Promise<boolean> {
   if (appName.toLowerCase() !== "github") return false;
   if (!await isChatGPTPage(page)) return false;
-  return ensureGitHubSelected(page, appName);
+  return ensureGitHubSelectedV2(page, appName);
+};
+
+const originalCreateAgent = provider.createAgent;
+provider.createAgent = async function createAgent(title: string, prompt: string): Promise<unknown> {
+  const agent = await originalCreateAgent.call(this, title, prompt) as { id: string; page: Page };
+  // The native provider starts its initialization asynchronously. Wait for that
+  // lifecycle before returning so agent.create + immediate agent.send cannot race
+  // the ChatGPT tab opening.
+  await provider.resumeAgent.call(this, agent.id).catch(() => undefined);
+
+  const self = this as unknown as {
+    agents?: Map<string, { id: string; page: Page; messages?: unknown[] }>;
+    onEvent?: (event: unknown) => void;
+  };
+  const managed = self.agents?.get(agent.id) ?? agent;
+  const emit = self.onEvent ?? (() => undefined);
+  const patch = (changes: Record<string, unknown>) => {
+    const current = self.agents?.get(agent.id);
+    if (current) Object.assign(current, changes, { updatedAt: Date.now() });
+  };
+  await startChatGPTPageSync(
+    managed as never,
+    managed.page,
+    emit as never,
+    patch as never,
+  ).catch(() => undefined);
+  return agent;
+};
+
+const originalStop = provider.stop;
+provider.stop = async function stop(): Promise<void> {
+  for (const agent of this.agents?.values() ?? []) stopChatGPTPageSync(agent.id);
+  return originalStop.call(this);
 };
 
 provider.submitComposer = async function submitComposer(page: Page, text: string): Promise<void> {
   const composer = await findComposer(page);
   if (!composer) throw new Error("ChatGPT composer is not visible");
   if (!await isChatGPTPage(page)) throw new Error("ChatGPT page navigated away from the conversation");
-
   await composer.click({ timeout: 5000 });
   await composer.fill(text);
   await page.waitForFunction((expected) => {
-    const nodes = Array.from(document.querySelectorAll<HTMLElement>(
-      "[contenteditable='true'], textarea, [role='textbox']",
-    ));
+    const nodes = Array.from(document.querySelectorAll<HTMLElement>("[contenteditable='true'], textarea, [role='textbox']"));
     return nodes.some((node) => {
       const style = window.getComputedStyle(node);
       const rect = node.getBoundingClientRect();
@@ -57,14 +92,7 @@ provider.submitComposer = async function submitComposer(page: Page, text: string
       return value.trim() === String(expected).trim();
     });
   }, text, { timeout: 5000 });
-
-  const sendSelectors = [
-    "button[data-testid='send-button']",
-    "button[aria-label*='Send' i]",
-    "button[aria-label*='发送' i]",
-    "button[type='submit']",
-  ];
-  for (const selector of sendSelectors) {
+  for (const selector of ["button[data-testid='send-button']", "button[aria-label*='Send' i]", "button[aria-label*='发送' i]", "button[type='submit']"]) {
     const buttons = page.locator(selector);
     for (let index = await buttons.count() - 1; index >= 0; index -= 1) {
       const button = buttons.nth(index);
