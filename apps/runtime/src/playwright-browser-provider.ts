@@ -157,12 +157,8 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     this.patch(agent, { status: "sending", lastError: "" });
     this.pushMessage(agent, { role: "user", text: message, createdAt });
     this.emit({ type: "agent.message", agentId: agent.id, role: "user", text: message, url: agent.page.url(), createdAt });
-
-    if (this.looksLikeGitHubRequest(message) && await this.selectChatGPTApp(agent.page, GITHUB_APP_NAME)) {
-      await this.submitComposerAfterAppSelection(agent.page, message);
-    } else {
-      await this.submitComposer(agent.page, message);
-    }
+    if (this.looksLikeGitHubRequest(message) && await this.selectChatGPTApp(agent.page, GITHUB_APP_NAME)) await this.submitComposerAfterAppSelection(agent.page, message);
+    else await this.submitComposer(agent.page, message);
     this.patch(agent, { status: "waiting", conversationUrl: agent.page.url() });
     await this.waitForUserTurn(agent.page, previousUser, message);
     const response = await this.waitForAssistant(agent.page, previousAssistant, agent);
@@ -174,28 +170,40 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
   private looksLikeGitHubRequest(text: string): boolean { return /\bgithub\b|\brepositories?\b|\brepos?\b|\bpull requests?\b|\bissues?\b|\bcommits?\b|\bbranches?\b|仓库|代码仓库|GitHub|拉取请求|分支|提交记录/i.test(text); }
 
   private async selectChatGPTApp(page: Page, appName: string): Promise<boolean> {
-    const target = await this.findComposer(page);
-    if (!target) return false;
-    const composer = page.locator(target.kind === "contenteditable" ? "[contenteditable='true']" : target.kind === "textarea" ? "textarea" : "[role='textbox']").nth(target.index);
-    if (!await this.isUsableElement(composer)) return false;
-
     try {
+      await this.waitForComposerOrLogin(page, 5000);
+      const target = await this.findComposer(page);
+      if (!target) return false;
+      const composer = page.locator(target.kind === "contenteditable" ? "[contenteditable='true']" : target.kind === "textarea" ? "textarea" : "[role='textbox']").nth(target.index);
+      if (!await this.isUsableElement(composer)) return false;
       await composer.click({ timeout: 5000 });
       await composer.pressSequentially("@", { delay: 20 });
+      await page.waitForTimeout(350);
+      await composer.pressSequentially(appName, { delay: 35 });
       if (await this.waitAndClickApp(page, appName, 5000)) return true;
+      const menuItems = page.locator('[role="option"], [role="menuitem"], [role="listbox"] [role="button"]');
+      if (await menuItems.count()) {
+        const first = menuItems.last();
+        if (await this.isUsableElement(first)) { await first.click({ timeout: 3000 }); await page.waitForTimeout(300); return true; }
+      }
       await composer.press("Escape").catch(() => undefined);
       await composer.press("Backspace").catch(() => undefined);
-    } catch {}
-
+      await composer.press("Backspace").catch(() => undefined);
+      await composer.press("Backspace").catch(() => undefined);
+    } catch (error) {
+      console.warn(`[BrowserCodingAgent] ChatGPT App selection retry: ${error instanceof Error ? error.message : String(error)}`);
+    }
     const plusSelectors = ['button[aria-label*="Add" i]', 'button[aria-label*="添加" i]', 'button[data-testid*="composer" i]', 'button[data-testid*="attach" i]'];
     for (const selector of plusSelectors) {
-      const buttons = page.locator(selector);
-      for (let index = await buttons.count() - 1; index >= 0; index -= 1) {
-        const button = buttons.nth(index);
-        if (!await this.isUsableElement(button)) continue;
-        try { await button.click({ timeout: 3000 }); } catch { continue; }
-        if (await this.waitAndClickApp(page, appName, 2500)) return true;
-      }
+      try {
+        const buttons = page.locator(selector);
+        for (let index = await buttons.count() - 1; index >= 0; index -= 1) {
+          const button = buttons.nth(index);
+          if (!await this.isUsableElement(button)) continue;
+          await button.click({ timeout: 3000 });
+          if (await this.waitAndClickApp(page, appName, 2500)) return true;
+        }
+      } catch { continue; }
     }
     return false;
   }
@@ -203,18 +211,20 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
   private async waitAndClickApp(page: Page, appName: string, timeoutMs: number): Promise<boolean> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      const candidates = page.getByText(appName, { exact: true });
-      for (let index = await candidates.count() - 1; index >= 0; index -= 1) {
-        const candidate = candidates.nth(index);
-        if (!await this.isUsableElement(candidate)) continue;
-        const tag = await candidate.evaluate((node) => node.tagName.toLowerCase()).catch(() => "");
-        const role = await candidate.getAttribute("role").catch(() => null);
-        if (tag === "button" || tag === "a" || role === "option" || role === "menuitem" || role === "button" || role === "listitem") {
-          await candidate.click({ timeout: 3000 });
-          await page.waitForTimeout(250);
-          return true;
+      try {
+        const candidates = page.getByText(appName, { exact: true });
+        for (let index = await candidates.count() - 1; index >= 0; index -= 1) {
+          const candidate = candidates.nth(index);
+          if (!await this.isUsableElement(candidate)) continue;
+          const tag = await candidate.evaluate((node) => node.tagName.toLowerCase()).catch(() => "");
+          const role = await candidate.getAttribute("role").catch(() => null);
+          if (tag === "button" || tag === "a" || role === "option" || role === "menuitem" || role === "button" || role === "listitem") {
+            await candidate.click({ timeout: 3000 });
+            await page.waitForTimeout(250);
+            return true;
+          }
         }
-      }
+      } catch { /* page may be navigating; retry */ }
       await page.waitForTimeout(150);
     }
     return false;
@@ -254,8 +264,8 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
 
   private async ensurePageReady(agent: ManagedAgent): Promise<void> { if (this.stopping || agent.page.isClosed()) throw new Error("Agent browser page is unavailable"); if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(agent.page.url())) await agent.page.goto(agent.conversationUrl || CHATGPT_URL, { waitUntil: "domcontentloaded", timeout: 30000 }); await this.waitForComposerOrLogin(agent.page, 30000); }
   private async waitForComposerOrLogin(page: Page, timeoutMs: number): Promise<void> { await page.waitForFunction(() => { const body = document.body?.innerText ?? ""; const nodes = Array.from(document.querySelectorAll<HTMLElement>("[contenteditable='true'], textarea, [role='textbox']")); const usable = nodes.some((node) => { const style = getComputedStyle(node); const rect = node.getBoundingClientRect(); return style.display !== "none" && style.visibility !== "hidden" && rect.width > 20 && rect.height > 10; }); return usable || /log in|sign in|登录|注册/i.test(body) || /\/auth\//i.test(location.pathname); }, undefined, { timeout: timeoutMs }); }
-  private async isAuthenticated(page: Page): Promise<boolean> { return page.evaluate(() => { if (/\/auth\//i.test(location.pathname) || /\/login/i.test(location.pathname)) return false; return Array.from(document.querySelectorAll<HTMLElement>("[contenteditable='true'], textarea, [role='textbox']")).some((node) => { const style = getComputedStyle(node); const rect = node.getBoundingClientRect(); return style.display !== "none" && style.visibility !== "hidden" && rect.width > 20 && rect.height > 10; }); }); }
-  private async findComposer(page: Page): Promise<{ kind: "contenteditable" | "textarea" | "role"; index: number } | undefined> { return page.evaluate(() => { const groups = [["[contenteditable='true']", "contenteditable"], ["textarea", "textarea"], ["[role='textbox']", "role"]] as const; for (const [selector, kind] of groups) { const nodes = Array.from(document.querySelectorAll<HTMLElement>(selector)); for (let index = nodes.length - 1; index >= 0; index -= 1) { const node = nodes[index]; if (!node) continue; const style = getComputedStyle(node); const rect = node.getBoundingClientRect(); if (style.display !== "none" && style.visibility !== "hidden" && rect.width > 20 && rect.height > 10) return { kind, index }; } } return undefined; }); }
+  private async isAuthenticated(page: Page): Promise<boolean> { try { return await page.evaluate(() => { if (/\/auth\//i.test(location.pathname) || /\/login/i.test(location.pathname)) return false; return Array.from(document.querySelectorAll<HTMLElement>("[contenteditable='true'], textarea, [role='textbox']")).some((node) => { const style = getComputedStyle(node); const rect = node.getBoundingClientRect(); return style.display !== "none" && style.visibility !== "hidden" && rect.width > 20 && rect.height > 10; }); }); } catch { return false; } }
+  private async findComposer(page: Page): Promise<{ kind: "contenteditable" | "textarea" | "role"; index: number } | undefined> { try { return await page.evaluate(() => { const groups = [["[contenteditable='true']", "contenteditable"], ["textarea", "textarea"], ["[role='textbox']", "role"]] as const; for (const [selector, kind] of groups) { const nodes = Array.from(document.querySelectorAll<HTMLElement>(selector)); for (let index = nodes.length - 1; index >= 0; index -= 1) { const node = nodes[index]; if (!node) continue; const style = getComputedStyle(node); const rect = node.getBoundingClientRect(); if (style.display !== "none" && style.visibility !== "hidden" && rect.width > 20 && rect.height > 10) return { kind, index }; } } return undefined; }); } catch { return undefined; } }
   private async isUsableElement(locator: ReturnType<Page["locator"]>): Promise<boolean> { return locator.evaluate((node) => { const element = node as HTMLElement; const style = getComputedStyle(element); const rect = element.getBoundingClientRect(); return style.display !== "none" && style.visibility !== "hidden" && rect.width > 1 && rect.height > 1; }).catch(() => false); }
   private async latestAssistant(page: Page): Promise<Snapshot> { return page.evaluate(() => { const nodes = Array.from(document.querySelectorAll<HTMLElement>("[data-message-author-role='assistant']")); const texts = [...new Set(nodes)].map((node) => node.innerText.trim()).filter(Boolean); return { text: texts.at(-1) ?? "", count: texts.length }; }); }
   private async latestUser(page: Page): Promise<Snapshot> { return page.evaluate(() => { const nodes = Array.from(document.querySelectorAll<HTMLElement>("[data-message-author-role='user']")); const texts = [...new Set(nodes)].map((node) => node.innerText.trim()).filter(Boolean); return { text: texts.at(-1) ?? "", count: texts.length }; }); }
