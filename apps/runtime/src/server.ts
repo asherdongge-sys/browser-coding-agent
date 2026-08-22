@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 import { WebSocket, WebSocketServer } from "ws";
 import { AgentLoop, type AgentEvent, type AgentContext } from "@browser-coding-agent/agent-core";
 import type { ApprovalResponse, RpcMessage, ToolCall, ToolResult } from "@browser-coding-agent/protocol";
@@ -88,7 +89,11 @@ function asApprovalResponse(value: unknown): ApprovalResponse { const record = a
 
 export async function startRuntimeServer(port = DEFAULT_PORT): Promise<ReturnType<typeof createRuntimeServer>> { const runtime = createRuntimeServer(port); await new Promise<void>((resolve) => runtime.httpServer.listen(port, "127.0.0.1", resolve)); console.log(`Browser Coding Agent runtime listening on http://127.0.0.1:${port}`); return runtime; }
 
-if (import.meta.url === `file://${process.argv[1]?.replace(/\\/g, "/")}`) {
+// Robust Windows + POSIX entry-point detection. Comparing import.meta.url directly with
+// a hand-built file:// string breaks on Windows because file URLs use an extra slash.
+const invokedScript = process.argv[1] ? resolve(process.argv[1]) : "";
+const currentScript = resolve(fileURLToPath(import.meta.url));
+if (invokedScript === currentScript) {
   const runtime = await startRuntimeServer();
   let closing = false;
   const shutdown = async (signal: string) => { if (closing) return; closing = true; console.log(`[BrowserCodingAgent] Received ${signal}, shutting down...`); await runtime.close(); console.log("[BrowserCodingAgent] Shutdown complete"); process.exit(0); };
