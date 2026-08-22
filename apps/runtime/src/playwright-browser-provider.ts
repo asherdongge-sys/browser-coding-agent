@@ -33,52 +33,27 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     this.onEvent = options.onEvent;
   }
 
-  async start(): Promise<void> {
-    if (this.context) return;
-    if (this.stopping) throw new Error("Browser provider is stopping");
-    if (this.startPromise) return this.startPromise;
-    this.startPromise = this.startInternal().finally(() => { this.startPromise = undefined; });
-    return this.startPromise;
-  }
-
+  async start(): Promise<void> { if (this.context) return; if (this.stopping) throw new Error("Browser provider is stopping"); if (this.startPromise) return this.startPromise; this.startPromise = this.startInternal().finally(() => { this.startPromise = undefined; }); return this.startPromise; }
   async listAgents(): Promise<BrowserAgent[]> { return [...this.agents.values()].map(({ page: _page, ...agent }) => agent); }
 
   async createAgent(title: string, prompt: string): Promise<BrowserAgent> {
-    await this.start();
-    if (this.stopping || !this.context) throw new Error("Browser provider is not running");
-    const page = await this.context.newPage();
-    this.observePage(page);
-    const normalizedPrompt = prompt.trim();
+    await this.start(); if (this.stopping || !this.context) throw new Error("Browser provider is not running");
+    const page = await this.context.newPage(); this.observePage(page); const normalizedPrompt = prompt.trim();
     const agent: ManagedAgent = { id: crypto.randomUUID(), title: title.trim() || `Agent ${new Date().toLocaleTimeString()}`, ...(normalizedPrompt ? { prompt: normalizedPrompt } : {}), status: "opening-chatgpt", createdAt: Date.now(), updatedAt: Date.now(), messages: [], page };
-    this.agents.set(agent.id, agent);
-    this.emit({ type: "agent.created", agent: this.publicAgent(agent) });
-    void this.initializeAgent(agent);
-    return this.publicAgent(agent);
+    this.agents.set(agent.id, agent); this.emit({ type: "agent.created", agent: this.publicAgent(agent) }); void this.initializeAgent(agent); return this.publicAgent(agent);
   }
 
   async sendMessage(agentId: string, text: string): Promise<void> {
-    if (text.startsWith(BROWSER_TASK_PREFIX)) {
-      await this.runTask(agentId, text.slice(BROWSER_TASK_PREFIX.length).trim());
-      return;
-    }
-    const agent = this.agents.get(agentId);
-    if (!agent) throw new Error(`Agent ${agentId} not found`);
-    await this.send(agent, text);
+    if (text.startsWith(BROWSER_TASK_PREFIX)) { await this.runTask(agentId, text.slice(BROWSER_TASK_PREFIX.length).trim()); return; }
+    const agent = this.agents.get(agentId); if (!agent) throw new Error(`Agent ${agentId} not found`); await this.send(agent, text);
   }
 
-  async resumeAgent(agentId: string): Promise<BrowserAgent> {
-    const agent = this.agents.get(agentId);
-    if (!agent) throw new Error(`Agent ${agentId} not found`);
-    await this.initializeAgent(agent);
-    return this.publicAgent(agent);
-  }
+  async resumeAgent(agentId: string): Promise<BrowserAgent> { const agent = this.agents.get(agentId); if (!agent) throw new Error(`Agent ${agentId} not found`); await this.initializeAgent(agent); return this.publicAgent(agent); }
 
   async runTask(agentId: string, goal: string): Promise<void> {
-    const agent = this.agents.get(agentId);
-    if (!agent) throw new Error(`Agent ${agentId} not found`);
-    if (!goal.trim()) throw new Error("Agent goal must not be empty");
-    await this.ensurePageReady(agent);
-    if (!await this.isAuthenticated(agent.page)) throw new Error("ChatGPT is not logged in");
+    const agent = this.agents.get(agentId); if (!agent) throw new Error(`Agent ${agentId} not found`); if (!goal.trim()) throw new Error("Agent goal must not be empty");
+    await this.ensurePageReady(agent); if (!await this.isAuthenticated(agent.page)) throw new Error("ChatGPT is not logged in");
+    const conversationUrl = agent.conversationUrl || agent.page.url();
     this.patch(agent, { status: "planning", lastError: "" });
     const executor = new BrowserTaskExecutor(agent.page, (kind, call, result) => {
       if (kind === "call") { this.emit({ type: "agent.tool.call", agentId: agent.id, call }); this.patch(agent, { status: "inspecting" }); }
@@ -86,68 +61,43 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     });
     try {
       const summary = await executor.run(goal);
+      if (!agent.page.isClosed() && conversationUrl && /^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(conversationUrl)) {
+        await agent.page.goto(conversationUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+        await this.waitForComposerOrLogin(agent.page, 30000);
+      }
       agent.messages.push({ role: "assistant", text: summary, createdAt: Date.now() });
-      this.emit({ type: "agent.message", agentId: agent.id, role: "assistant", text: summary, url: agent.page.url(), createdAt: Date.now(), streaming: false });
-      this.patch(agent, { status: "completed", conversationUrl: agent.page.url(), lastError: "" });
-      await this.persist();
+      this.emit({ type: "agent.message", agentId: agent.id, role: "assistant", text: summary, url: conversationUrl, createdAt: Date.now(), streaming: false });
+      this.patch(agent, { status: "completed", conversationUrl, lastError: "" }); await this.persist();
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.patch(agent, { status: "failed", lastError: message });
-      throw error;
+      const message = error instanceof Error ? error.message : String(error); this.patch(agent, { status: "failed", lastError: message }); throw error;
     } finally { await this.keepDashboardForeground(); }
   }
 
-  async stop(): Promise<void> {
-    this.stopping = true;
-    const context = this.context;
-    this.context = undefined;
-    this.dashboardPage = undefined;
-    this.agents.clear();
-    if (context) { try { await context.close(); } catch (error) { console.error("[BrowserCodingAgent] Playwright context close failed:", error); } }
-  }
+  async stop(): Promise<void> { this.stopping = true; const context = this.context; this.context = undefined; this.dashboardPage = undefined; this.agents.clear(); if (context) { try { await context.close(); } catch (error) { console.error("[BrowserCodingAgent] Playwright context close failed:", error); } } }
 
   private async startInternal(): Promise<void> {
     const context = await chromium.launchPersistentContext(this.profileDir, { headless: this.headless, viewport: { width: 1440, height: 900 }, ignoreDefaultArgs: ["--no-sandbox"], ...(this.executablePath ? { executablePath: this.executablePath } : {}) });
-    this.context = context;
-    if (this.stopping) { await context.close(); this.context = undefined; throw new Error("Browser provider stopped during startup"); }
-    const startupPage = context.pages()[0] ?? await context.newPage();
-    this.observePage(startupPage); this.dashboardPage = startupPage; await this.openDashboard(startupPage);
-    for (const page of context.pages()) if (page !== startupPage) this.observePage(page);
+    this.context = context; if (this.stopping) { await context.close(); this.context = undefined; throw new Error("Browser provider stopped during startup"); }
+    const startupPage = context.pages()[0] ?? await context.newPage(); this.observePage(startupPage); this.dashboardPage = startupPage; await this.openDashboard(startupPage); for (const page of context.pages()) if (page !== startupPage) this.observePage(page);
   }
 
-  private async openDashboard(page: Page): Promise<void> {
-    for (let attempt = 1; attempt <= 20; attempt += 1) {
-      if (this.stopping) throw new Error("Browser provider is stopping");
-      try { if (page.url() !== DASHBOARD_URL) await page.goto(DASHBOARD_URL, { waitUntil: "domcontentloaded", timeout: 3000 }); return; }
-      catch (error) { if (attempt === 20) throw error; await new Promise((resolve) => setTimeout(resolve, 250)); }
-    }
-  }
-
+  private async openDashboard(page: Page): Promise<void> { for (let attempt = 1; attempt <= 20; attempt += 1) { if (this.stopping) throw new Error("Browser provider is stopping"); try { if (page.url() !== DASHBOARD_URL) await page.goto(DASHBOARD_URL, { waitUntil: "domcontentloaded", timeout: 3000 }); return; } catch (error) { if (attempt === 20) throw error; await new Promise((resolve) => setTimeout(resolve, 250)); } } }
   private async keepDashboardForeground(): Promise<void> { const dashboard = this.dashboardPage; if (!dashboard || dashboard.isClosed() || this.headless || this.stopping) return; try { await dashboard.bringToFront(); } catch {} }
 
   private async initializeAgent(agent: ManagedAgent): Promise<void> {
     try {
-      if (this.stopping || agent.page.isClosed()) throw new Error("Agent browser page is unavailable");
-      this.patch(agent, { status: "opening-chatgpt", lastError: "" });
-      const target = agent.conversationUrl || CHATGPT_URL;
+      if (this.stopping || agent.page.isClosed()) throw new Error("Agent browser page is unavailable"); this.patch(agent, { status: "opening-chatgpt", lastError: "" }); const target = agent.conversationUrl || CHATGPT_URL;
       if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(agent.page.url()) || agent.page.url() === "about:blank") await agent.page.goto(target, { waitUntil: "domcontentloaded", timeout: 30000 });
-      await this.waitForComposerOrLogin(agent.page, 30000);
-      if (!await this.isAuthenticated(agent.page)) { this.patch(agent, { status: "login-required", lastError: "请在托管的 Chromium 中完成 ChatGPT 登录，然后点击继续。" }); return; }
-      this.patch(agent, { status: "idle", conversationUrl: agent.page.url(), lastError: "" });
-      if (agent.prompt) { const prompt = agent.prompt; delete agent.prompt; await this.send(agent, prompt); }
-    } catch (error) { if (!this.stopping) this.patch(agent, { status: "failed", lastError: error instanceof Error ? error.message : String(error) }); }
-    finally { await this.keepDashboardForeground(); }
+      await this.waitForComposerOrLogin(agent.page, 30000); if (!await this.isAuthenticated(agent.page)) { this.patch(agent, { status: "login-required", lastError: "请在托管的 Chromium 中完成 ChatGPT 登录，然后点击继续。" }); return; }
+      this.patch(agent, { status: "idle", conversationUrl: agent.page.url(), lastError: "" }); if (agent.prompt) { const prompt = agent.prompt; delete agent.prompt; await this.send(agent, prompt); }
+    } catch (error) { if (!this.stopping) this.patch(agent, { status: "failed", lastError: error instanceof Error ? error.message : String(error) }); } finally { await this.keepDashboardForeground(); }
   }
 
   private async send(agent: ManagedAgent, text: string): Promise<void> {
-    const message = text.trim(); if (!message) throw new Error("Message cannot be empty");
-    await this.ensurePageReady(agent); if (!await this.isAuthenticated(agent.page)) throw new Error("ChatGPT is not logged in");
-    const previousAssistant = await this.latestAssistant(agent.page); const previousUser = await this.latestUser(agent.page); const createdAt = Date.now();
-    this.patch(agent, { status: "sending", lastError: "" }); this.pushMessage(agent, { role: "user", text: message, createdAt });
-    this.emit({ type: "agent.message", agentId: agent.id, role: "user", text: message, url: agent.page.url(), createdAt });
-    await this.submitComposer(agent.page, message); this.patch(agent, { status: "waiting", conversationUrl: agent.page.url() });
-    await this.waitForUserTurn(agent.page, previousUser, message); const response = await this.waitForAssistant(agent.page, previousAssistant, agent);
-    this.finalizeAssistant(agent, response); this.patch(agent, { status: "idle", conversationUrl: agent.page.url(), lastError: "" }); await this.persist();
+    const message = text.trim(); if (!message) throw new Error("Message cannot be empty"); await this.ensurePageReady(agent); if (!await this.isAuthenticated(agent.page)) throw new Error("ChatGPT is not logged in");
+    const previousAssistant = await this.latestAssistant(agent.page); const previousUser = await this.latestUser(agent.page); const createdAt = Date.now(); this.patch(agent, { status: "sending", lastError: "" }); this.pushMessage(agent, { role: "user", text: message, createdAt });
+    this.emit({ type: "agent.message", agentId: agent.id, role: "user", text: message, url: agent.page.url(), createdAt }); await this.submitComposer(agent.page, message); this.patch(agent, { status: "waiting", conversationUrl: agent.page.url() });
+    await this.waitForUserTurn(agent.page, previousUser, message); const response = await this.waitForAssistant(agent.page, previousAssistant, agent); this.finalizeAssistant(agent, response); this.patch(agent, { status: "idle", conversationUrl: agent.page.url(), lastError: "" }); await this.persist();
   }
 
   private pushMessage(agent: ManagedAgent, message: BrowserAgentMessage): void { agent.messages.push(message); void this.persist(); }
