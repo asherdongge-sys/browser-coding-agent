@@ -5,6 +5,7 @@ const CHATGPT_URL = "https://chatgpt.com/";
 const DASHBOARD_URL = process.env.BROWSER_CODING_AGENT_DASHBOARD_URL ?? "http://127.0.0.1:4317/";
 const RESPONSE_TIMEOUT_MS = 120000;
 const STABILITY_MS = 1000;
+const TURN_IDLE_TIMEOUT_MS = 30000;
 
 export type PlaywrightBrowserProviderOptions = {
   profileDir?: string;
@@ -185,6 +186,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
       throw new Error("ChatGPT is not logged in");
     }
 
+    await this.waitForTurnIdle(agent.page);
     const previous = await this.latestAssistant(agent.page);
     this.patch(agent, { status: "sending", lastError: "" });
     await this.keepDashboardForeground();
@@ -194,6 +196,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     this.patch(agent, { status: "waiting", conversationUrl: agent.page.url() });
 
     const response = await this.waitForAssistant(agent.page, previous);
+    await this.waitForTurnIdle(agent.page);
     this.emit({ type: "agent.message", agentId: agent.id, role: "assistant", text: response, url: agent.page.url() });
     this.patch(agent, { status: "idle", conversationUrl: agent.page.url(), lastError: "" });
   }
@@ -224,13 +227,24 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     });
   }
 
+  private async waitForTurnIdle(page: Page): Promise<void> {
+    await page.waitForFunction(() => {
+      const stopButton = document.querySelector('button[data-testid="stop-button"], button[aria-label*="Stop generating" i], button[aria-label*="停止" i]');
+      const sendButton = document.querySelector('button[data-testid="send-button"], button[aria-label*="Send" i], button[aria-label*="发送" i]');
+      return !stopButton && Boolean(sendButton);
+    }, undefined, { timeout: TURN_IDLE_TIMEOUT_MS });
+  }
+
   private async fillComposer(page: Page, text: string): Promise<void> {
     const composer = page.locator("[contenteditable='true'], textarea, [role='textbox']").first();
     await composer.waitFor({ state: "visible", timeout: 15000 });
     await composer.fill(text);
     await page.waitForTimeout(300);
-    const sendButton = page.locator('button[data-testid="send-button"], button[aria-label*="Send" i], button[type="submit"]').first();
-    if (await sendButton.isVisible().catch(() => false)) { await sendButton.click(); return; }
+    const sendButton = page.locator('button[data-testid="send-button"], button[aria-label*="Send" i], button[aria-label*="发送" i], button[type="submit"]').first();
+    if (await sendButton.isVisible().catch(() => false)) {
+      await sendButton.click();
+      return;
+    }
     await composer.press("Enter");
   }
 
