@@ -1,0 +1,4 @@
+node_modules/
+dist/
+*.local.json
+.browser-coding-agent/
