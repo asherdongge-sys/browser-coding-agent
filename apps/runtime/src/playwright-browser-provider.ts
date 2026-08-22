@@ -151,10 +151,17 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
       if (this.stopping) throw new Error("Browser provider is stopping");
       if (agent.page.isClosed()) throw new Error("Agent browser page is closed");
       this.patch(agent, { status: "opening-chatgpt", lastError: "" });
+      await this.keepDashboardForeground();
+
       if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(agent.page.url())) {
         await agent.page.goto(CHATGPT_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
       }
+      // ChatGPT is a background implementation page. Return focus immediately
+      // after navigation so the user's browser stays on our Dashboard.
+      await this.keepDashboardForeground();
+
       await this.waitForComposerOrLogin(agent.page, 30000);
+      await this.keepDashboardForeground();
       if (!await this.isAuthenticated(agent.page)) {
         this.patch(agent, { status: "login-required", lastError: "请在托管的 Chromium 中完成 ChatGPT 登录，然后点击继续。" });
         return;
@@ -181,8 +188,10 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     }
     const previous = await this.latestAssistant(agent.page);
     this.patch(agent, { status: "sending", lastError: "" });
+    await this.keepDashboardForeground();
     this.emit({ type: "agent.message", agentId: agent.id, role: "user", text, url: agent.page.url() });
     await this.fillComposer(agent.page, text);
+    await this.keepDashboardForeground();
     this.patch(agent, { status: "waiting", conversationUrl: agent.page.url() });
     const response = await this.waitForAssistant(agent.page, previous);
     this.emit({ type: "agent.message", agentId: agent.id, role: "assistant", text: response, url: agent.page.url() });
@@ -194,6 +203,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     if (agent.page.isClosed()) throw new Error("Agent browser page is closed");
     if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(agent.page.url())) {
       await agent.page.goto(CHATGPT_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
+      await this.keepDashboardForeground();
     }
     await this.waitForComposerOrLogin(agent.page, 30000);
   }
