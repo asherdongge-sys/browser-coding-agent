@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer, type WebSocket } from "ws";
 import { AgentLoop, type AgentEvent, type AgentContext } from "@browser-coding-agent/agent-core";
@@ -82,5 +83,41 @@ function requiredString(value: unknown, name: string): string { if (typeof value
 function asApprovalResponse(value: unknown): ApprovalResponse { const record = asRecord(value); const requestId = requiredString(record.requestId, "requestId"); const decision = record.decision; if (decision !== "allow_once" && decision !== "allow_session" && decision !== "deny") throw new Error("Invalid approval decision"); return { requestId, decision }; }
 function safeWorkspaceRoot(workspace: WorkspaceManager): string | null { try { return workspace.getRoot(); } catch { return null; } }
 function reply(socket: WebSocket, id: string | number, result?: unknown, error?: { code: number; message: string }): void { safeSend(socket, { jsonrpc: "2.0", id, ...(error ? { error } : { result }) }); }
+function openDashboard(url: string): void {
+  if (process.env.BROWSER_CODING_AGENT_NO_AUTO_OPEN === "1") return;
+  try {
+    if (process.platform === "win32") execFile("cmd.exe", ["/c", "start", "", url], { windowsHide: true });
+    else if (process.platform === "darwin") execFile("open", [url]);
+    else execFile("xdg-open", [url]);
+  } catch (error) {
+    console.warn("[BrowserCodingAgent] Unable to open dashboard:", error instanceof Error ? error.message : String(error));
+  }
+}
+
 const runtime = createRuntimeServer();
-runtime.httpServer.listen(runtime.port, "127.0.0.1", () => console.log(`Browser Coding Agent runtime listening on http://127.0.0.1:${runtime.port}`));
+let shuttingDown = false;
+const shutdown = (): void => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log("[BrowserCodingAgent] Shutting down...");
+  for (const socket of [...runtimeClients(runtime)]) {
+    try { (socket as any).terminate?.(); } catch { /* ignore */ }
+  }
+  runtime.httpServer.close(() => {
+    console.log("[BrowserCodingAgent] Shutdown complete");
+    process.exit(0);
+  });
+  setTimeout(() => process.exit(0), 1500).unref();
+};
+process.once("SIGINT", shutdown);
+process.once("SIGTERM", shutdown);
+runtime.httpServer.listen(runtime.port, "127.0.0.1", () => {
+  const url = `http://127.0.0.1:${runtime.port}/`;
+  console.log(`Browser Coding Agent runtime listening on ${url}`);
+  openDashboard(url);
+});
+
+function runtimeClients(runtimeServer: ReturnType<typeof createRuntimeServer>): WebSocket[] {
+  const sockets = (runtimeServer as unknown as { wsServer?: { clients?: Set<WebSocket> } }).wsServer?.clients;
+  return sockets ? [...sockets] : [];
+}
