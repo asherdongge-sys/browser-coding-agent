@@ -36,6 +36,14 @@ async function waitForComposer(page: Page, timeoutMs = 30000): Promise<Composer 
   return undefined;
 }
 
+async function hasVisibleGitHubMenu(page: Page): Promise<boolean> {
+  return page.evaluate(() => {
+    const visible = (node: HTMLElement) => { const style = getComputedStyle(node); const rect = node.getBoundingClientRect(); return style.display !== "none" && style.visibility !== "hidden" && rect.width > 1 && rect.height > 1; };
+    return Array.from(document.querySelectorAll<HTMLElement>("[role='option'], [role='menuitem'], [role='listbox']"))
+      .some((node) => visible(node) && /github/i.test(node.innerText || node.textContent || ""));
+  }).catch(() => false);
+}
+
 async function hasCommittedGitHubMention(page: Page): Promise<boolean> {
   if (!isConversationPage(page)) return false;
   return page.evaluate(() => {
@@ -46,8 +54,7 @@ async function hasCommittedGitHubMention(page: Page): Promise<boolean> {
     const explicit = Array.from(composer.querySelectorAll<HTMLElement>("[data-mention], [data-testid*='mention' i], [aria-label*='GitHub' i]")).some(visible);
     if (explicit) return true;
     const text = `${composer.textContent ?? ""} ${(composer as HTMLTextAreaElement).value ?? ""}`;
-    const menuOpen = Array.from(document.querySelectorAll<HTMLElement>("[role='option'], [role='menuitem'], [role='listbox']")).some(visible);
-    return /(^|\s)@GitHub(?:\s|$)/i.test(text) && !menuOpen;
+    return /(^|\s)@GitHub(?:\s|$)/i.test(text) && !Array.from(document.querySelectorAll<HTMLElement>("[role='option'], [role='menuitem'], [role='listbox']")).some(visible);
   }).catch(() => false);
 }
 
@@ -62,23 +69,43 @@ async function visibleGitHubOption(page: Page): Promise<ReturnType<Page["locator
   return undefined;
 }
 
+async function composerAlreadyContainsMention(page: Page): Promise<boolean> {
+  const composer = await findComposer(page);
+  if (!composer) return false;
+  const text = await composer.evaluate((node) => `${node.textContent ?? ""} ${(node as HTMLTextAreaElement).value ?? ""}`).catch(() => "");
+  return /@GitHub/i.test(text);
+}
+
 async function selectGitHubInternal(page: Page): Promise<boolean> {
   const composer = await waitForComposer(page);
   if (!composer) return false;
   if (await hasCommittedGitHubMention(page)) return true;
+  if (await composerAlreadyContainsMention(page)) {
+    await composer.press("Space").catch(() => undefined);
+    await page.waitForTimeout(500);
+    return isConversationPage(page) && !await hasVisibleGitHubMenu(page);
+  }
   await composer.click({ timeout: 5000 });
+  // One and only one injection per selection attempt. If it fails, do not
+  // type the mention again; otherwise retries become @GitHub @GitHub ... .
   await composer.pressSequentially("@GitHub", { delay: 35 });
   await page.waitForTimeout(350);
   if (!isConversationPage(page)) return false;
+
+  // In the current ChatGPT UI Space is the stable keyboard commit action.
   await composer.press("Space").catch(() => undefined);
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(700);
   if (!isConversationPage(page)) return false;
   if (await hasCommittedGitHubMention(page)) return true;
+  if (!await hasVisibleGitHubMenu(page) && await findComposer(page)) return true;
+
+  // Only a non-navigation menu item is allowed as a fallback. Never click
+  // an <a href> because that navigates to the GitHub app detail page.
   const option = await visibleGitHubOption(page);
   if (option) {
     await option.click({ timeout: 2000 }).catch(() => undefined);
     await page.waitForTimeout(500);
-    if (isConversationPage(page) && await hasCommittedGitHubMention(page)) return true;
+    if (isConversationPage(page) && !await hasVisibleGitHubMenu(page)) return true;
   }
   return false;
 }
