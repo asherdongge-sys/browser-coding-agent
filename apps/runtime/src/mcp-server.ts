@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { McpStdioClient } from "@browser-coding-agent/mcp";
 import { PlaywrightBrowserProvider } from "./playwright-browser-provider.js";
+import { getGitHubConnection } from "./github-oauth.js";
 
 const runtimeRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const githubServer = resolve(runtimeRoot, "github-mcp/dist/server.js");
@@ -20,8 +21,9 @@ const browserTools = [
 
 async function start() {
   await browser.start();
-  if (process.env.GITHUB_TOKEN) {
-    github = new McpStdioClient(process.execPath, [githubServer]);
+  const connection = await getGitHubConnection();
+  if (connection) {
+    github = new McpStdioClient(process.execPath, [githubServer], { GITHUB_ACCESS_TOKEN: connection.accessToken });
     await github.start();
     githubTools = await github.listTools();
   }
