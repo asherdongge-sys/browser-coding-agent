@@ -1,10 +1,11 @@
 import { createInterface } from "node:readline";
 
-const token = process.env.GITHUB_TOKEN;
 const apiBase = "https://api.github.com";
+const accessToken = process.env.GITHUB_ACCESS_TOKEN;
+const token = accessToken ?? process.env.GITHUB_TOKEN;
 
 const tools = [
-  { name: "github.list_repositories", description: "List repositories visible to the configured GitHub account.", inputSchema: { type: "object", properties: { page: { type: "number" }, perPage: { type: "number" } } } },
+  { name: "github.list_repositories", description: "List repositories visible to the connected GitHub account.", inputSchema: { type: "object", properties: { page: { type: "number" }, perPage: { type: "number" } } } },
   { name: "github.search_repositories", description: "Search GitHub repositories by name or description.", inputSchema: { type: "object", properties: { query: { type: "string" }, perPage: { type: "number" } }, required: ["query"] } },
   { name: "github.get_file", description: "Read a file from a GitHub repository.", inputSchema: { type: "object", properties: { owner: { type: "string" }, repo: { type: "string" }, path: { type: "string" }, ref: { type: "string" } }, required: ["owner", "repo", "path"] } },
   { name: "github.get_issue", description: "Get a GitHub issue or pull request by number.", inputSchema: { type: "object", properties: { owner: { type: "string" }, repo: { type: "string" }, number: { type: "number" } }, required: ["owner", "repo", "number"] } },
@@ -12,7 +13,7 @@ const tools = [
 ] as const;
 
 async function github(path: string, init?: RequestInit): Promise<any> {
-  if (!token) throw new Error("GITHUB_TOKEN is not configured");
+  if (!token) throw new Error("GitHub is not connected. Connect GitHub in Browser Coding Agent settings first.");
   const response = await fetch(`${apiBase}${path}`, { ...init, headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}`, "X-GitHub-Api-Version": "2022-11-28", ...(init?.headers ?? {}) } });
   const text = await response.text();
   let body: any; try { body = text ? JSON.parse(text) : undefined; } catch { body = text; }
