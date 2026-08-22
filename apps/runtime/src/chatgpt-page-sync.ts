@@ -2,80 +2,42 @@ import type { Page } from "playwright";
 import type { BrowserAgent, BrowserAgentMessage, BrowserAgentEvent } from "./browser-provider.js";
 
 type Snapshot = { text: string; count: number };
-type SyncState = {
-  timer: ReturnType<typeof setInterval>;
-  user: Snapshot;
-  assistant: Snapshot;
-  pendingAssistant: string;
-  assistantStableSince: number;
-  syncRunning: boolean;
-};
+type SyncState = { timer: ReturnType<typeof setInterval>; user: Snapshot; assistant: Snapshot; pendingAssistant: string; assistantStableSince: number; syncRunning: boolean };
 
 const states = new Map<string, SyncState>();
-const ASSISTANT_STABILITY_MS = 900;
+const POLL_INTERVAL_MS = 2500;
+const ASSISTANT_STABILITY_MS = 1200;
 
 async function snapshot(page: Page, role: "user" | "assistant"): Promise<Snapshot> {
   try {
     return await page.evaluate((messageRole) => {
-      const nodes = Array.from(document.querySelectorAll<HTMLElement>(
-        `[data-message-author-role='${messageRole}']`,
-      ));
-      const texts = nodes
-        .map((node) => (node.innerText || node.textContent || "").trim())
-        .filter(Boolean);
+      const nodes = Array.from(document.querySelectorAll<HTMLElement>(`[data-message-author-role='${messageRole}']`));
+      const texts = nodes.map((node) => (node.innerText || node.textContent || "").trim()).filter(Boolean);
       return { text: texts.at(-1) ?? "", count: texts.length };
     }, role);
-  } catch {
-    return { text: "", count: 0 };
-  }
+  } catch { return { text: "", count: 0 }; }
 }
 
 function hasMessage(agent: BrowserAgent, role: BrowserAgentMessage["role"], text: string): boolean {
   const normalized = text.trim();
-  return Boolean(normalized) && (agent.messages ?? []).some(
-    (message) => message.role === role && message.text.trim() === normalized,
-  );
+  return Boolean(normalized) && (agent.messages ?? []).some((message) => message.role === role && message.text.trim() === normalized);
 }
 
-export async function startChatGPTPageSync(
-  agent: BrowserAgent,
-  page: Page,
-  emit: (event: BrowserAgentEvent) => void,
-  patch: (patch: Partial<BrowserAgent>) => void,
-): Promise<void> {
+export async function startChatGPTPageSync(agent: BrowserAgent, page: Page, emit: (event: BrowserAgentEvent) => void, patch: (patch: Partial<BrowserAgent>) => void): Promise<void> {
   stopChatGPTPageSync(agent.id);
   const initialUser = await snapshot(page, "user");
   const initialAssistant = await snapshot(page, "assistant");
-  const state: SyncState = {
-    timer: undefined as unknown as ReturnType<typeof setInterval>,
-    user: initialUser,
-    assistant: initialAssistant,
-    pendingAssistant: "",
-    assistantStableSince: 0,
-    syncRunning: false,
-  };
+  const state: SyncState = { timer: undefined as unknown as ReturnType<typeof setInterval>, user: initialUser, assistant: initialAssistant, pendingAssistant: "", assistantStableSince: 0, syncRunning: false };
   state.timer = setInterval(() => {
     if (state.syncRunning) return;
     state.syncRunning = true;
-    void syncOnce(agent, page, state, emit, patch).finally(() => {
-      state.syncRunning = false;
-    });
-  }, 900);
+    void syncOnce(agent, page, state, emit, patch).finally(() => { state.syncRunning = false; });
+  }, POLL_INTERVAL_MS);
   states.set(agent.id, state);
 }
 
-async function syncOnce(
-  agent: BrowserAgent,
-  page: Page,
-  state: SyncState,
-  emit: (event: BrowserAgentEvent) => void,
-  patch: (patch: Partial<BrowserAgent>) => void,
-): Promise<void> {
-  if (page.isClosed()) {
-    stopChatGPTPageSync(agent.id);
-    return;
-  }
-
+async function syncOnce(agent: BrowserAgent, page: Page, state: SyncState, emit: (event: BrowserAgentEvent) => void, patch: (patch: Partial<BrowserAgent>) => void): Promise<void> {
+  if (page.isClosed()) { stopChatGPTPageSync(agent.id); return; }
   const user = await snapshot(page, "user");
   const assistant = await snapshot(page, "assistant");
 
@@ -97,17 +59,10 @@ async function syncOnce(
     state.assistant = assistant;
   }
 
-  // ChatGPT renders assistant responses incrementally. Do not publish every
-  // DOM fragment to the dashboard. Wait until the text has stopped changing.
-  if (
-    state.pendingAssistant &&
-    state.assistantStableSince > 0 &&
-    Date.now() - state.assistantStableSince >= ASSISTANT_STABILITY_MS
-  ) {
+  if (state.pendingAssistant && state.assistantStableSince > 0 && Date.now() - state.assistantStableSince >= ASSISTANT_STABILITY_MS) {
     const text = state.pendingAssistant;
     state.pendingAssistant = "";
     state.assistantStableSince = 0;
-
     const last = agent.messages?.at(-1);
     if (last?.role === "assistant") {
       if (last.text.trim() === text.trim()) return;
