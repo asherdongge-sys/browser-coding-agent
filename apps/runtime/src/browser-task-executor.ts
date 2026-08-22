@@ -19,7 +19,7 @@ export class BrowserTaskExecutor {
       if (!result.ok) throw new Error(result.error ?? `Browser tool failed: ${call.tool}`);
       if (result.result !== undefined) results.push(this.stringifyResult(result.result));
     }
-    return results.filter(Boolean).join("\n\n") || "浏览器任务已完成。";
+    return results.filter(Boolean).join("\n") || "浏览器任务已完成。";
   }
 
   private plan(goal: string): BrowserToolCall[] {
@@ -96,71 +96,50 @@ export class BrowserTaskExecutor {
             await searchBox.fill(query);
             await searchBox.press("Enter");
           }
+          await this.page.waitForLoadState("domcontentloaded", { timeout: 10000 }).catch(() => undefined);
           return { ok: true, result: { searched: query, url: this.page.url() } };
         }
         case "browser.click": {
           const text = String(call.arguments.text ?? "").trim();
           if (!text) return { ok: false, error: "browser.click requires text" };
-          const candidates = [
-            this.page.getByRole("button", { name: text, exact: false }).last(),
-            this.page.getByRole("link", { name: text, exact: false }).last(),
-            this.page.getByText(text, { exact: false }).last(),
-          ];
-          for (const candidate of candidates) {
-            if (await candidate.count() && await candidate.isVisible().catch(() => false)) {
-              await candidate.click({ timeout: 10000 });
-              return { ok: true, result: { clicked: text } };
-            }
-          }
+          const candidates = [this.page.getByRole("button", { name: text, exact: false }).last(), this.page.getByRole("link", { name: text, exact: false }).last(), this.page.getByText(text, { exact: false }).last()];
+          for (const candidate of candidates) { if (await candidate.count() && await candidate.isVisible().catch(() => false)) { await candidate.click({ timeout: 10000 }); return { ok: true, result: { clicked: text } }; } }
           return { ok: false, error: `Could not find a visible element matching: ${text}` };
         }
         case "browser.type": {
-          const text = String(call.arguments.text ?? "");
-          const selector = typeof call.arguments.selector === "string" ? call.arguments.selector : undefined;
-          const target = selector ? this.page.locator(selector).last() : this.page.locator("input:visible, textarea:visible, [contenteditable='true']:visible, [role='textbox']:visible").last();
-          await target.waitFor({ state: "visible", timeout: 10000 });
-          await target.fill(text, { timeout: 10000 });
-          return { ok: true, result: { typed: text } };
+          const text = String(call.arguments.text ?? ""); const selector = typeof call.arguments.selector === "string" ? call.arguments.selector : undefined; const target = selector ? this.page.locator(selector).last() : this.page.locator("input:visible, textarea:visible, [contenteditable='true']:visible, [role='textbox']:visible").last(); await target.waitFor({ state: "visible", timeout: 10000 }); await target.fill(text, { timeout: 10000 }); return { ok: true, result: { typed: text } };
         }
         case "browser.press": {
-          const key = String(call.arguments.key ?? "Enter");
-          const target = this.page.locator("input:visible, textarea:visible, [contenteditable='true']:visible, [role='textbox']:visible").last();
-          await target.waitFor({ state: "visible", timeout: 10000 });
-          await target.press(key, { timeout: 10000 });
-          return { ok: true, result: { key } };
+          const key = String(call.arguments.key ?? "Enter"); const target = this.page.locator("input:visible, textarea:visible, [contenteditable='true']:visible, [role='textbox']:visible").last(); await target.waitFor({ state: "visible", timeout: 10000 }); await target.press(key, { timeout: 10000 }); return { ok: true, result: { key } };
         }
         case "browser.scroll": {
-          const direction = String(call.arguments.direction ?? "down");
-          await this.page.evaluate((value) => {
-            if (value === "top") window.scrollTo({ top: 0, behavior: "smooth" });
-            else if (value === "bottom") window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
-            else window.scrollBy({ top: value === "up" ? -window.innerHeight * 0.8 : window.innerHeight * 0.8, behavior: "smooth" });
-          }, direction);
-          return { ok: true, result: { direction } };
+          const direction = String(call.arguments.direction ?? "down"); await this.page.evaluate((value) => { if (value === "top") window.scrollTo({ top: 0, behavior: "smooth" }); else if (value === "bottom") window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" }); else window.scrollBy({ top: value === "up" ? -window.innerHeight * 0.8 : window.innerHeight * 0.8, behavior: "smooth" }); }, direction); return { ok: true, result: { direction } };
         }
         case "browser.read_page": {
-          const text = await this.page.locator("body").innerText({ timeout: 10000 });
-          return { ok: true, result: text.slice(0, 12000) };
+          const text = await this.page.locator("body").innerText({ timeout: 10000 }); return { ok: true, result: text.slice(0, 12000) };
         }
         case "browser.extract": {
-          const selector = String(call.arguments.selector ?? "").trim();
-          if (!selector) return { ok: false, error: "browser.extract requires a CSS selector" };
-          const text = await this.page.locator(selector).allInnerTexts();
-          return { ok: true, result: text.slice(0, 100).join("\n") };
+          const selector = String(call.arguments.selector ?? "").trim(); if (!selector) return { ok: false, error: "browser.extract requires a CSS selector" }; const text = await this.page.locator(selector).allInnerTexts(); return { ok: true, result: text.slice(0, 100).join("\n") };
         }
         case "browser.wait": {
-          const ms = Math.max(0, Math.min(Number(call.arguments.ms ?? 500), 10000));
-          await this.page.waitForTimeout(ms);
-          return { ok: true, result: { waitedMs: ms } };
+          const ms = Math.max(0, Math.min(Number(call.arguments.ms ?? 500), 10000)); await this.page.waitForTimeout(ms); return { ok: true, result: { waitedMs: ms } };
         }
       }
-    } catch (error) {
-      return { ok: false, error: error instanceof Error ? error.message : String(error) };
-    }
+    } catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
   }
 
   private stringifyResult(value: unknown): string {
     if (typeof value === "string") return value;
+    if (value && typeof value === "object") {
+      const record = value as Record<string, unknown>;
+      if (typeof record.searched === "string") return `已搜索“${record.searched}”。${typeof record.url === "string" ? `结果页：${record.url}` : ""}`.trim();
+      if (typeof record.url === "string") return `已打开：${record.url}`;
+      if (typeof record.clicked === "string") return `已点击：${record.clicked}`;
+      if (typeof record.typed === "string") return `已输入：${record.typed}`;
+      if (typeof record.key === "string") return `已按键：${record.key}`;
+      if (typeof record.direction === "string") return `已滚动：${record.direction}`;
+      if (typeof record.waitedMs === "number") return `已等待 ${record.waitedMs}ms`;
+    }
     try { return JSON.stringify(value); } catch { return String(value); }
   }
 }
