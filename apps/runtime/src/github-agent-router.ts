@@ -1,6 +1,6 @@
 import type { McpStdioClient } from "@browser-coding-agent/mcp";
 
-export type GitHubMcpRoute = { tool: string; arguments: Record<string, unknown> };
+export type GitHubMcpRoute = { tool: string; arguments: Record<string, unknown>; originalUserMessage: string };
 
 const INTERNAL_MCP_PREFIX = "::github-mcp-internal::";
 const ORIGINAL_MESSAGE_PREFIX = "ORIGINAL_USER_MESSAGE_JSON:";
@@ -11,10 +11,10 @@ export function planGitHubMcpRoute(text: string): GitHubMcpRoute | undefined {
   if (/(?:前\s*\d+|top\s*\d+|列表|list|有哪些|我有权限访问)/i.test(value) && /仓库|repositories?|repos?/i.test(value)) {
     const match = value.match(/(?:前|top)\s*(\d+)/i);
     const perPage = Math.min(50, Math.max(1, Number(match?.[1] ?? 5)));
-    return { tool: "github.list_repositories", arguments: { page: 1, perPage } };
+    return { tool: "github.list_repositories", arguments: { page: 1, perPage }, originalUserMessage: text };
   }
   const search = value.match(/(?:搜索|查找|search)\s*(?:github\s*)?(?:仓库|repositories?|repos?)?\s*[：:]?\s*[“\"]?([^”\"，。]+)[”\"]?/i);
-  if (search?.[1]) return { tool: "github.search_repositories", arguments: { query: search[1].trim(), perPage: 10 } };
+  if (search?.[1]) return { tool: "github.search_repositories", arguments: { query: search[1].trim(), perPage: 10 }, originalUserMessage: text };
   return undefined;
 }
 
@@ -42,10 +42,10 @@ function compactGitHubResult(route: GitHubMcpRoute, result: unknown): unknown {
   return records;
 }
 
-export function formatGitHubMcpContext(route: GitHubMcpRoute, result: unknown, originalUserMessage: string): string {
+export function formatGitHubMcpContext(route: GitHubMcpRoute, result: unknown): string {
   return [
     INTERNAL_MCP_PREFIX,
-    `${ORIGINAL_MESSAGE_PREFIX}${JSON.stringify(originalUserMessage)}`,
+    `${ORIGINAL_MESSAGE_PREFIX}${JSON.stringify(route.originalUserMessage)}`,
     "根据下面的 GitHub MCP 结果直接回答用户原始问题。只输出最终答案，不要提及 MCP、工具调用、执行过程或内部上下文。",
     `工具结果：${JSON.stringify(compactGitHubResult(route, result))}`,
   ].join("\n");
