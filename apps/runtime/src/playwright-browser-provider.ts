@@ -70,7 +70,6 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     this.observePage(page);
     this.emit({ type: "agent.created", agent: this.publicAgent(agent) });
     await this.keepDashboardForeground();
-
     const initialization = this.initializeAgent(agent);
     this.initialization.set(agent.id, initialization);
     void initialization.finally(() => {
@@ -93,9 +92,8 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     const agent = this.agents.get(agentId);
     if (!agent) throw new Error(`Agent ${agentId} not found`);
     const existing = this.initialization.get(agent.id);
-    if (existing) {
-      await existing;
-    } else {
+    if (existing) await existing;
+    else {
       const initialization = this.initializeAgent(agent);
       this.initialization.set(agent.id, initialization);
       await initialization.finally(() => {
@@ -111,29 +109,22 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     if (!goal.trim()) throw new Error("Agent goal must not be empty");
     const initialization = this.initialization.get(agent.id);
     if (initialization) await initialization;
-    if (agent.status === "failed" || agent.status === "login-required") {
-      throw new Error(agent.lastError || "Agent initialization is not ready");
-    }
+    if (agent.status === "failed" || agent.status === "login-required") throw new Error(agent.lastError || "Agent initialization is not ready");
     await this.ensurePageReady(agent);
     if (!await this.isAuthenticated(agent.page)) throw new Error("ChatGPT is not logged in");
-
     const conversationUrl = agent.conversationUrl || agent.page.url();
     const startedAt = Date.now();
     this.patch(agent, { status: "planning", lastError: "" });
     this.emitTaskMessage(agent, `浏览器任务开始：${goal}`);
-
     const taskPage = await this.context!.newPage();
     this.observePage(taskPage);
     const executor = new BrowserTaskExecutor(taskPage, (kind, call, result) => {
       if (kind === "call") {
         this.emit({ type: "agent.tool.call", agentId: agent.id, call });
         this.patch(agent, { status: "inspecting" });
-      } else if (result) {
-        this.emit({ type: "agent.tool.result", agentId: agent.id, call, result });
-      }
+      } else if (result) this.emit({ type: "agent.tool.result", agentId: agent.id, call, result });
       void this.keepDashboardForeground();
     });
-
     try {
       const summary = await executor.run(goal);
       if (!taskPage.isClosed()) await taskPage.close();
@@ -146,9 +137,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
       this.emitTaskMessage(agent, `浏览器任务失败：${message}`);
       this.patch(agent, { status: "failed", lastError: message });
       throw error;
-    } finally {
-      await this.keepDashboardForeground();
-    }
+    } finally { await this.keepDashboardForeground(); }
   }
 
   async stop(): Promise<void> {
@@ -212,16 +201,23 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
         return;
       }
 
-      this.patch(agent, { status: "ready", conversationUrl: agent.page.url(), lastError: "" });
-      await startChatGPTPageSync(agent, agent.page, this.emit.bind(this), (patch) => this.patch(agent, patch));
-
-      const prompt = agent.initialPrompt;
+      const prompt = agent.initialPrompt?.trim();
       agent.initialPrompt = undefined;
-      if (prompt) {
-        await this.sendNow(agent, prompt);
-      } else {
+
+      this.patch(agent, { status: "ready", conversationUrl: agent.page.url(), lastError: "" });
+
+      // Do not start ChatGPT page sync for an empty Agent. The sync layer may
+      // observe or modify composer state during initialization.
+      if (!prompt) {
         this.patch(agent, { status: "idle", conversationUrl: agent.page.url(), lastError: "" });
+        return;
       }
+
+      await this.sendNow(agent, prompt);
+
+      // Only start page synchronization after the explicit initial message
+      // has been submitted.
+      await startChatGPTPageSync(agent, agent.page, this.emit.bind(this), (patch) => this.patch(agent, patch));
     } catch (error) {
       if (!this.stopping) this.patch(agent, { status: "failed", lastError: error instanceof Error ? error.message : String(error) });
     } finally {
@@ -232,9 +228,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
   private async send(agent: ManagedAgent, text: string): Promise<void> {
     const initialization = this.initialization.get(agent.id);
     if (initialization) await initialization;
-    if (agent.status === "failed" || agent.status === "login-required") {
-      throw new Error(agent.lastError || "Agent initialization is not ready");
-    }
+    if (agent.status === "failed" || agent.status === "login-required") throw new Error(agent.lastError || "Agent initialization is not ready");
     await this.sendNow(agent, text);
   }
 
@@ -243,16 +237,13 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     if (!message) throw new Error("Message cannot be empty");
     await this.ensurePageReady(agent);
     if (!await this.isAuthenticated(agent.page)) throw new Error("ChatGPT is not logged in");
-
     const previousAssistant = await this.latestAssistant(agent.page);
     const previousUser = await this.latestUser(agent.page);
     const createdAt = Date.now();
     this.patch(agent, { status: "sending", lastError: "" });
     this.pushMessage(agent, { role: "user", text: message, createdAt });
     this.emit({ type: "agent.message", agentId: agent.id, role: "user", text: message, url: agent.page.url(), createdAt });
-
     await this.submitComposer(agent.page, message);
-
     this.patch(agent, { status: "waiting", conversationUrl: agent.page.url() });
     await this.waitForUserTurn(agent.page, previousUser, message);
     const response = await this.waitForAssistant(agent.page, previousAssistant, agent);
