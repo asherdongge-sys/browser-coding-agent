@@ -1,14 +1,13 @@
 import type { Page } from "playwright";
 import { PlaywrightBrowserProvider } from "./playwright-browser-provider.js";
-import { ensureGitHubSelectedV2, submitMessageAfterGitHubSelection } from "./github-app-selector-v2.js";
+import { ensureGitHubSelectedV2, primeGitHubSelectionLease } from "./github-app-selector-v2.js";
 import { startChatGPTPageSync } from "./chatgpt-page-sync.js";
 
 type Managed = { id: string; page: Page; status?: string; conversationUrl?: string; lastError?: string; updatedAt?: number; messages?: unknown[] };
 type ProviderPrototype = {
   createAgent(title: string, prompt: string): Promise<unknown>;
   initializeAgent(agent: Managed): Promise<void>;
-  submitComposerAfterAppSelection(page: Page, text: string): Promise<void>;
-  selectChatGPTApp(page: Page, appName: string): Promise<boolean>;
+  sendNow(agent: Managed, text: string): Promise<void>;
   emit(event: any): void;
   agents?: Map<string, Managed>;
   initialization?: Map<string, Promise<void>>;
@@ -51,12 +50,6 @@ function patchAgent(self: unknown, agentId: string, changes: Record<string, unkn
   if (!agent) return;
   Object.assign(agent, changes, { updatedAt: Date.now() });
   target.onEvent?.({ type: "agent.updated", agent: { ...agent } });
-}
-
-function agentForPage(self: unknown, page: Page): Managed | undefined {
-  const target = self as { agents?: Map<string, Managed> };
-  for (const agent of target.agents?.values() ?? []) if (agent.page === page) return agent;
-  return undefined;
 }
 
 provider.emit = function emit(event: any): void {
@@ -118,30 +111,15 @@ provider.initializeAgent = async function initializeAgent(agent: Managed): Promi
     if (agent.prompt) {
       const prompt = agent.prompt;
       delete agent.prompt;
-      patchAgent(this, agent.id, { status: "sending", conversationUrl: agent.page.url(), lastError: "" });
-      await this.submitComposerAfterAppSelection(agent.page, prompt);
-      patchAgent(this, agent.id, { status: "waiting", conversationUrl: agent.page.url(), lastError: "" });
+      // initializeAgent has already selected GitHub. The native send path also
+      // performs a selection check, so reserve one selection lease for it and
+      // one for the runtime's legacy post-create initialization check.
+      primeGitHubSelectionLease(agent.page);
+      await this.sendNow(agent, prompt);
     } else {
       patchAgent(this, agent.id, { status: "idle", conversationUrl: agent.page.url(), lastError: "" });
     }
   } catch (error) {
     patchAgent(this, agent.id, { status: "failed", lastError: error instanceof Error ? error.message : String(error), conversationUrl: agent.page.url() });
   }
-};
-
-provider.submitComposerAfterAppSelection = async function submitComposerAfterAppSelection(page: Page, text: string): Promise<void> {
-  await submitMessageAfterGitHubSelection(page, text);
-};
-
-provider.selectChatGPTApp = async function selectChatGPTApp(page: Page, appName: string): Promise<boolean> {
-  if (appName.toLowerCase() !== "github") return false;
-  if (!await isChatGPTPage(page)) return false;
-  const selected = await ensureGitHubSelectedV2(page, appName);
-  const agent = agentForPage(this, page);
-  if (agent) {
-    patchAgent(this, agent.id, selected
-      ? { status: "ready", lastError: "", conversationUrl: page.url() }
-      : { status: "failed", lastError: "GitHub connector could not be selected", conversationUrl: page.url() });
-  }
-  return selected;
 };
