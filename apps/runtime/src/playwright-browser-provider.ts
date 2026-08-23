@@ -9,7 +9,7 @@ const STABILITY_MS = 1000;
 const BROWSER_TASK_PREFIX = "::browser-task::";
 const GITHUB_APP_NAME = "GitHub";
 
-type ManagedAgent = BrowserAgent & { page: Page };
+type ManagedAgent = BrowserAgent & { page: Page; initialPrompt?: string; githubSelected: boolean };
 type Snapshot = { text: string; count: number };
 export type PlaywrightBrowserProviderOptions = { profileDir?: string; headless?: boolean; executablePath?: string; onEvent?: (event: BrowserAgentEvent) => void };
 
@@ -41,14 +41,24 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     return this.startPromise;
   }
 
-  async listAgents(): Promise<BrowserAgent[]> { return [...this.agents.values()].map(({ page: _page, ...agent }) => agent); }
+  async listAgents(): Promise<BrowserAgent[]> { return [...this.agents.values()].map(({ page: _page, initialPrompt: _prompt, githubSelected: _github, ...agent }) => agent); }
 
   async createAgent(title: string, prompt: string): Promise<BrowserAgent> {
     await this.start();
     if (this.stopping || !this.context) throw new Error("Browser provider is not running");
     const page = await this.context.newPage();
     const normalizedPrompt = prompt.trim();
-    const agent: ManagedAgent = { id: crypto.randomUUID(), title: title.trim() || `Agent ${new Date().toLocaleTimeString()}`, ...(normalizedPrompt ? { prompt: normalizedPrompt } : {}), status: "opening-chatgpt", createdAt: Date.now(), updatedAt: Date.now(), messages: [], page };
+    const agent: ManagedAgent = {
+      id: crypto.randomUUID(),
+      title: title.trim() || `Agent ${new Date().toLocaleTimeString()}`,
+      status: "opening-chatgpt",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      messages: [],
+      page,
+      ...(normalizedPrompt ? { initialPrompt: normalizedPrompt } : {}),
+      githubSelected: false,
+    };
     this.agents.set(agent.id, agent);
     this.observePage(page);
     this.emit({ type: "agent.created", agent: this.publicAgent(agent) });
@@ -153,41 +163,51 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
       if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(agent.page.url()) || agent.page.url() === "about:blank") await agent.page.goto(target, { waitUntil: "domcontentloaded", timeout: 30000 });
       await this.waitForComposerOrLogin(agent.page, 30000);
       if (!await this.isAuthenticated(agent.page)) { this.patch(agent, { status: "login-required", lastError: "请在托管的 Chromium 中完成 ChatGPT 登录，然后点击继续。" }); return; }
-      if (agent.prompt) {
-        const prompt = agent.prompt;
-        delete agent.prompt;
-        this.patch(agent, { status: "initializing", conversationUrl: agent.page.url(), lastError: "" });
-        if (this.looksLikeGitHubRequest(prompt) && !await this.selectChatGPTApp(agent.page, GITHUB_APP_NAME)) throw new Error("GitHub App could not be selected before the first message");
-        await this.sendNow(agent, prompt);
-        return;
+
+      this.patch(agent, { status: "initializing", conversationUrl: agent.page.url(), lastError: "" });
+      // Every agent selects GitHub exactly once during initialization, independent of prompt content.
+      if (!agent.githubSelected) {
+        const selected = await this.selectChatGPTApp(agent.page, GITHUB_APP_NAME);
+        if (!selected) throw new Error("GitHub connector could not be selected from the ChatGPT composer");
+        agent.githubSelected = true;
       }
-      this.patch(agent, { status: "idle", conversationUrl: agent.page.url(), lastError: "" });
-    } catch (error) { if (!this.stopping) this.patch(agent, { status: "failed", lastError: error instanceof Error ? error.message : String(error) }); }
-    finally { await this.keepDashboardForeground(); }
+
+      const prompt = agent.initialPrompt;
+      agent.initialPrompt = undefined;
+      if (prompt) await this.sendNow(agent, prompt, true);
+      else this.patch(agent, { status: "idle", conversationUrl: agent.page.url(), lastError: "" });
+    } catch (error) {
+      if (!this.stopping) this.patch(agent, { status: "failed", lastError: error instanceof Error ? error.message : String(error) });
+    } finally { await this.keepDashboardForeground(); }
   }
 
   private async send(agent: ManagedAgent, text: string): Promise<void> {
     const initialization = this.initialization.get(agent.id);
     if (initialization) await initialization;
     if (agent.status === "failed" || agent.status === "login-required") throw new Error(agent.lastError || "Agent initialization is not ready");
-    await this.sendNow(agent, text);
+    await this.sendNow(agent, text, false);
   }
 
-  private async sendNow(agent: ManagedAgent, text: string): Promise<void> {
+  private async sendNow(agent: ManagedAgent, text: string, githubAlreadySelected: boolean): Promise<void> {
     const message = text.trim();
     if (!message) throw new Error("Message cannot be empty");
     await this.ensurePageReady(agent);
     if (!await this.isAuthenticated(agent.page)) throw new Error("ChatGPT is not logged in");
+
+    if (!githubAlreadySelected && this.looksLikeGitHubRequest(message) && !agent.githubSelected) {
+      // Never type "@GitHub" into the composer. If selection was lost, recover through the UI once.
+      const selected = await this.selectChatGPTApp(agent.page, GITHUB_APP_NAME);
+      if (!selected) throw new Error("GitHub connector could not be selected from the ChatGPT composer");
+      agent.githubSelected = true;
+    }
+
     const previousAssistant = await this.latestAssistant(agent.page);
     const previousUser = await this.latestUser(agent.page);
     const createdAt = Date.now();
     this.patch(agent, { status: "sending", lastError: "" });
     this.pushMessage(agent, { role: "user", text: message, createdAt });
     this.emit({ type: "agent.message", agentId: agent.id, role: "user", text: message, url: agent.page.url(), createdAt });
-    if (this.looksLikeGitHubRequest(message)) {
-      if (!await this.selectChatGPTApp(agent.page, GITHUB_APP_NAME)) throw new Error("GitHub App could not be selected before sending the message");
-      await this.submitComposerAfterAppSelection(agent.page, message);
-    } else await this.submitComposer(agent.page, message);
+    await this.submitComposer(agent.page, message);
     this.patch(agent, { status: "waiting", conversationUrl: agent.page.url() });
     await this.waitForUserTurn(agent.page, previousUser, message);
     const response = await this.waitForAssistant(agent.page, previousAssistant, agent);
@@ -206,97 +226,127 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
       const composer = page.locator(target.kind === "contenteditable" ? "[contenteditable='true']" : target.kind === "textarea" ? "textarea" : "[role='textbox']").nth(target.index);
       if (!await this.isUsableElement(composer)) return false;
       await composer.click({ timeout: 5000 });
-      await composer.pressSequentially(`@${appName}`, { delay: 35 });
-      if (await this.waitAndClickApp(page, appName, 4500)) return true;
-      await composer.press("Space").catch(() => undefined);
-      if (await this.waitForAppMentionActive(page, appName, 2500)) return true;
-      if (await this.waitAndClickApp(page, appName, 1500)) return true;
-      await composer.press("Escape").catch(() => undefined);
-      await this.clearComposerMention(composer);
+
+      // Use ChatGPT's connector UI. Do NOT type @GitHub: doing so creates a transient mention/input state and can produce a separate turn or repeated GitHub chips.
+      const menuOpened = await this.openConnectorMenu(page);
+      if (!menuOpened) return false;
+      return await this.clickConnectorMenuItem(page, appName);
     } catch (error) {
-      console.warn(`[BrowserCodingAgent] ChatGPT App selection failed: ${error instanceof Error ? error.message : String(error)}`);
+      console.warn(`[BrowserCodingAgent] ChatGPT connector selection failed: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
     }
-    const plusSelectors = ['button[aria-label*="Add" i]', 'button[aria-label*="添加" i]', 'button[data-testid*="composer" i]', 'button[data-testid*="attach" i]'];
-    for (const selector of plusSelectors) {
-      try {
-        const buttons = page.locator(selector);
-        for (let index = await buttons.count() - 1; index >= 0; index -= 1) {
-          const button = buttons.nth(index);
-          if (!await this.isUsableElement(button)) continue;
-          await button.click({ timeout: 3000 });
-          if (await this.waitAndClickApp(page, appName, 2500)) return true;
-        }
-      } catch { continue; }
+  }
+
+  private async openConnectorMenu(page: Page): Promise<boolean> {
+    const selectors = [
+      'button[aria-label*="mention" i]',
+      'button[aria-label*="connector" i]',
+      'button[aria-label*="app" i]',
+      'button[aria-label*="tool" i]',
+      'button[data-testid*="mention" i]',
+      'button[data-testid*="connector" i]',
+      'button[data-testid*="app" i]',
+      'button[data-testid*="tool" i]',
+      'button[aria-label*="添加" i]',
+      'button[aria-label*="工具" i]',
+    ];
+
+    for (const selector of selectors) {
+      const buttons = page.locator(selector);
+      const count = await buttons.count().catch(() => 0);
+      for (let index = count - 1; index >= 0; index -= 1) {
+        const button = buttons.nth(index);
+        if (!await this.isUsableElement(button)) continue;
+        if (await button.isDisabled().catch(() => true)) continue;
+        await button.click({ timeout: 2500 }).catch(() => undefined);
+        if (await this.isConnectorMenuVisible(page)) return true;
+      }
     }
     return false;
   }
 
-  private async waitAndClickApp(page: Page, appName: string, timeoutMs: number): Promise<boolean> {
+  private async isConnectorMenuVisible(page: Page): Promise<boolean> {
+    return page.evaluate(() => {
+      const visible = (node: Element) => {
+        const el = node as HTMLElement;
+        const style = getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 2 && rect.height > 2;
+      };
+      return Array.from(document.querySelectorAll<HTMLElement>('[role="menu"], [role="listbox"], [role="dialog"], [data-radix-menu-content], [data-radix-popper-content-wrapper]')).some(visible);
+    }).catch(() => false);
+  }
+
+  private async clickConnectorMenuItem(page: Page, appName: string): Promise<boolean> {
+    const selectors = [
+      '[role="menuitem"]',
+      '[role="option"]',
+      '[role="menu"] button',
+      '[role="listbox"] button',
+      '[data-radix-menu-content] button',
+      '[data-radix-popper-content-wrapper] button',
+    ];
+
+    for (const selector of selectors) {
+      const items = page.locator(selector);
+      const count = await items.count().catch(() => 0);
+      for (let index = count - 1; index >= 0; index -= 1) {
+        const item = items.nth(index);
+        if (!await this.isUsableElement(item)) continue;
+        const text = await item.innerText().catch(() => "");
+        const aria = await item.getAttribute("aria-label").catch(() => null);
+        const value = `${text} ${aria ?? ""}`.trim();
+        if (!new RegExp(`\\b${this.escapeRegExp(appName)}\\b`, "i").test(value)) continue;
+        await item.click({ timeout: 3000 }).catch(async () => {
+          await item.locator("..").first().click({ timeout: 3000 });
+        });
+        if (await this.waitForSelectedConnector(page, appName, 2500)) return true;
+      }
+    }
+    return false;
+  }
+
+  private async waitForSelectedConnector(page: Page, appName: string, timeoutMs: number): Promise<boolean> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      try {
-        const candidates = page.getByText(appName, { exact: true });
-        for (let index = await candidates.count() - 1; index >= 0; index -= 1) {
-          const candidate = candidates.nth(index);
-          if (!await this.isUsableElement(candidate)) continue;
-          await candidate.click({ timeout: 1500 }).catch(async () => {
-            const parent = candidate.locator("..").first();
-            if (await this.isUsableElement(parent)) await parent.click({ timeout: 1500 });
-            else throw new Error("GitHub candidate is not clickable");
-          });
-          if (await this.waitForAppMentionActive(page, appName, 1800)) return true;
-        }
-      } catch { }
-      await page.waitForTimeout(150);
+      if (await this.isSelectedConnector(page, appName)) return true;
+      await page.waitForTimeout(250);
     }
     return false;
   }
 
-  private async waitForAppMentionActive(page: Page, appName: string, timeoutMs: number): Promise<boolean> {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      if (await this.isAppMentionActive(page, appName)) return true;
-      await page.waitForTimeout(120);
-    }
-    return false;
+  private async isSelectedConnector(page: Page, appName: string): Promise<boolean> {
+    return page.evaluate((name) => {
+      const visible = (node: HTMLElement) => {
+        const style = getComputedStyle(node);
+        const rect = node.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 2 && rect.height > 2;
+      };
+      const composerNodes = Array.from(document.querySelectorAll<HTMLElement>("[contenteditable='true'], textarea, [role='textbox']"));
+      const composer = composerNodes.reverse().find(visible);
+      if (!composer) return false;
+
+      const scopes: HTMLElement[] = [composer];
+      let scope: HTMLElement | null = composer.parentElement;
+      for (let depth = 0; depth < 4 && scope; depth += 1, scope = scope.parentElement) scopes.push(scope);
+      for (const root of scopes) {
+        const nodes = Array.from(root.querySelectorAll<HTMLElement>("[data-mention], [data-testid*='mention' i], [data-testid*='connector' i], [aria-label], button, [role='button'], [contenteditable='false'], span"));
+        if (nodes.some((node) => visible(node) && `${node.getAttribute("aria-label") ?? ""} ${node.textContent ?? ""}`.toLowerCase().includes(name.toLowerCase()))) return true;
+      }
+      return false;
+    }, appName).catch(() => false);
   }
 
-  private async isAppMentionActive(page: Page, appName: string): Promise<boolean> {
-    try {
-      return await page.evaluate((name) => {
-        const visible = (node: HTMLElement) => { const style = getComputedStyle(node); const rect = node.getBoundingClientRect(); return style.display !== "none" && style.visibility !== "hidden" && rect.width > 1 && rect.height > 1; };
-        const composerNodes = Array.from(document.querySelectorAll<HTMLElement>("[contenteditable='true'], textarea, [role='textbox']"));
-        const composer = composerNodes.reverse().find(visible);
-        if (!composer) return false;
-        const value = composer.textContent ?? (composer as HTMLTextAreaElement).value ?? "";
-        const html = composer.innerHTML ?? "";
-        const mention = Array.from(composer.querySelectorAll<HTMLElement>("[data-mention], [data-testid*='mention' i], [aria-label*='GitHub' i]")).some(visible);
-        const menuStillOpen = Array.from(document.querySelectorAll<HTMLElement>("[role='option'], [role='menuitem'], [role='listbox']")).some(visible);
-        const literalMention = value.includes(`@${name}`) || html.includes(`@${name}`);
-        return mention || (!menuStillOpen && !literalMention && document.activeElement === composer);
-      }, appName);
-    } catch { return false; }
-  }
-
-  private async clearComposerMention(composer: ReturnType<Page["locator"]>): Promise<void> {
-    try { await composer.press("Control+A"); await composer.press("Backspace"); } catch { }
-  }
-
-  private async submitComposerAfterAppSelection(page: Page, text: string): Promise<void> {
-    const target = await this.findComposer(page);
-    if (!target) throw new Error("ChatGPT composer is not visible after selecting GitHub");
-    const composer = page.locator(target.kind === "contenteditable" ? "[contenteditable='true']" : target.kind === "textarea" ? "textarea" : "[role='textbox']").nth(target.index);
-    if (!await this.isUsableElement(composer)) throw new Error("ChatGPT composer is not usable after selecting GitHub");
-    await composer.click({ timeout: 5000 });
-    await composer.pressSequentially(text, { delay: 5 });
-    await this.clickSendButton(page, composer);
-  }
+  private escapeRegExp(value: string): string { return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
 
   private async submitComposer(page: Page, text: string): Promise<void> {
     const target = await this.findComposer(page);
     if (!target) throw new Error("ChatGPT composer is not visible");
     const composer = page.locator(target.kind === "contenteditable" ? "[contenteditable='true']" : target.kind === "textarea" ? "textarea" : "[role='textbox']").nth(target.index);
-    await composer.fill(text);
+    if (!await this.isUsableElement(composer)) throw new Error("ChatGPT composer is not usable");
+    await composer.click({ timeout: 5000 });
+    await composer.press("End").catch(() => undefined);
+    await composer.pressSequentially(text, { delay: 5 });
     await this.clickSendButton(page, composer);
   }
 
@@ -330,7 +380,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
   private emitTaskMessage(agent: ManagedAgent, text: string): void { this.emit({ type: "agent.message", agentId: agent.id, role: "assistant", text, url: agent.page.url(), createdAt: Date.now(), streaming: false }); }
   private emit(event: BrowserAgentEvent): void { this.onEvent?.(event); }
   private patch(agent: ManagedAgent, patch: Partial<BrowserAgent>): void { Object.assign(agent, patch, { updatedAt: Date.now() }); this.emit({ type: "agent.updated", agent: this.publicAgent(agent) }); }
-  private publicAgent(agent: ManagedAgent): BrowserAgent { const { page: _page, ...publicAgent } = agent; return publicAgent; }
+  private publicAgent(agent: ManagedAgent): BrowserAgent { const { page: _page, initialPrompt: _prompt, githubSelected: _github, ...publicAgent } = agent; return publicAgent; }
   private async persist(): Promise<void> {}
   private observePage(_page: Page): void {}
 }
