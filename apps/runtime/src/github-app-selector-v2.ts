@@ -9,7 +9,9 @@ const selectionLeases = new WeakMap<Page, number>();
 const chat = (page: Page): boolean => {
   try {
     const url = new URL(page.url());
-    return url.protocol === "https:" && (url.hostname === "chatgpt.com" || url.hostname === "chat.openai.com") && !/^\/(apps|gpts)(?:\/|$)/i.test(url.pathname);
+    return url.protocol === "https:" &&
+      (url.hostname === "chatgpt.com" || url.hostname === "chat.openai.com") &&
+      !/^\/(apps|gpts)(?:\/|$)/i.test(url.pathname);
   } catch {
     return false;
   }
@@ -68,74 +70,111 @@ async function isGitHubSelected(page: Page): Promise<boolean> {
   }
 }
 
-async function clickGitHubMenuItem(page: Page): Promise<boolean> {
-  const deadline = Date.now() + 5000;
-  while (Date.now() < deadline) {
-    for (const selector of ["[role='option']", "[role='menuitem']", "[data-testid*='app' i]", "[data-testid*='connector' i]"]) {
-      const items = page.locator(selector);
-      for (let index = await items.count() - 1; index >= 0; index -= 1) {
-        const item = items.nth(index);
-        if (!await visible(item)) continue;
-        const text = await item.innerText().catch(() => "");
-        const label = await item.getAttribute("aria-label").catch(() => null);
-        if (!/GitHub/i.test(`${text} ${label ?? ""}`)) continue;
-        await item.click({ timeout: 1500 }).catch(() => undefined);
-        if (await isGitHubSelected(page)) return true;
-      }
-    }
+function isConnectorMenuItemText(text: string): boolean {
+  return /GitHub/i.test(text) && !/(plugin|plugins|details|directory|管理|详情)/i.test(text);
+}
 
-    const exact = page.getByText("GitHub", { exact: true });
-    for (let index = await exact.count() - 1; index >= 0; index -= 1) {
-      const item = exact.nth(index);
-      if (!await visible(item)) continue;
-      await item.click({ timeout: 1500 }).catch(() => undefined);
-      if (await isGitHubSelected(page)) return true;
+async function findOpenMenu(page: Page): Promise<Composer | undefined> {
+  const candidates = [
+    page.locator("[role='menu']:visible"),
+    page.locator("[role='listbox']:visible"),
+    page.locator("[data-radix-menu-content]:visible"),
+    page.locator("[data-radix-popper-content-wrapper]:visible"),
+  ];
+
+  for (const menus of candidates) {
+    for (let index = await menus.count() - 1; index >= 0; index -= 1) {
+      const menu = menus.nth(index);
+      if (await visible(menu)) return menu;
     }
-    await page.waitForTimeout(200);
   }
+  return undefined;
+}
+
+async function clickGitHubMenuItem(page: Page, menu: Composer): Promise<boolean> {
+  const items = menu.locator("[role='menuitem'], [role='option'], button, a");
+  const count = await items.count();
+
+  for (let index = 0; index < count; index += 1) {
+    const item = items.nth(index);
+    if (!await visible(item)) continue;
+
+    const text = [
+      await item.innerText().catch(() => ""),
+      await item.getAttribute("aria-label").catch(() => null) ?? "",
+      await item.getAttribute("title").catch(() => null) ?? "",
+    ].join(" ");
+
+    if (!isConnectorMenuItemText(text)) continue;
+
+    const beforeUrl = page.url();
+    await item.click({ timeout: 2500 });
+
+    await page.waitForTimeout(300);
+
+    // Selecting a connector must never navigate into the app/plugin directory.
+    if (!chat(page) || page.url() !== beforeUrl) return false;
+    if (await isGitHubSelected(page)) return true;
+  }
+
   return false;
 }
 
-async function openConnectorMenu(page: Page): Promise<boolean> {
-  const selectors = [
-    'button[aria-label*="app" i]',
-    'button[aria-label*="connector" i]',
-    'button[aria-label*="tool" i]',
-    'button[aria-label*="add" i]',
-    'button[data-testid*="app" i]',
-    'button[data-testid*="connector" i]',
-    'button[data-testid*="composer" i]',
-  ];
+async function openConnectorMenu(page: Page, composer: Composer): Promise<boolean> {
+  // Only inspect controls associated with the composer. Never scan arbitrary
+  // "GitHub" text or app/plugin links across the whole document.
+  const root = composer.locator("xpath=ancestor-or-self::*[self::form or @data-testid or @role='group'][1]");
+  const scope = await root.count() > 0 ? root : page.locator("body");
 
-  for (const selector of selectors) {
-    const buttons = page.locator(selector);
-    for (let index = await buttons.count() - 1; index >= 0; index -= 1) {
-      const button = buttons.nth(index);
-      if (!await visible(button)) continue;
-      const aria = await button.getAttribute("aria-label").catch(() => null);
-      const title = await button.getAttribute("title").catch(() => null);
-      const text = await button.innerText().catch(() => "");
-      if (!/(app|connector|tool|add|添加|应用|连接器|工具)/i.test(`${aria ?? ""} ${title ?? ""} ${text}`)) continue;
-      await button.click({ timeout: 2500 }).catch(() => undefined);
-      if (await clickGitHubMenuItem(page)) return true;
-    }
+  const buttons = scope.locator("button");
+  const count = await buttons.count();
+
+  for (let index = 0; index < count; index += 1) {
+    const button = buttons.nth(index);
+    if (!await visible(button)) continue;
+
+    const aria = await button.getAttribute("aria-label").catch(() => null);
+    const title = await button.getAttribute("title").catch(() => null);
+    const testId = await button.getAttribute("data-testid").catch(() => null);
+    const text = await button.innerText().catch(() => "");
+    const label = `${aria ?? ""} ${title ?? ""} ${testId ?? ""} ${text}`;
+
+    if (!/(^|\b)(app|apps|connector|tool|more|add|attach|应用|连接器|工具|更多)(\b|$)/i.test(label)) continue;
+
+    const beforeUrl = page.url();
+    await button.click({ timeout: 2500 }).catch(() => undefined);
+    await page.waitForTimeout(250);
+
+    if (!chat(page) || page.url() !== beforeUrl) return false;
+
+    const menu = await findOpenMenu(page);
+    if (!menu) continue;
+
+    if (await clickGitHubMenuItem(page, menu)) return true;
+
+    // This was a real menu, but it was not the connector menu. Close it once
+    // and continue; do not retry the click repeatedly.
+    await page.keyboard.press("Escape").catch(() => undefined);
   }
+
   return false;
 }
 
 async function choose(page: Page): Promise<boolean> {
   const composer = await waitForComposer(page);
   if (!composer) return false;
+
   if (await isGitHubSelected(page)) {
     composers.set(page, composer);
     return true;
   }
 
   await composer.click({ timeout: 5000 }).catch(() => undefined);
-  if (await openConnectorMenu(page)) {
+  if (await openConnectorMenu(page, composer)) {
     composers.set(page, composer);
     return true;
   }
+
   return false;
 }
 
@@ -145,13 +184,16 @@ export function primeGitHubSelectionLease(page: Page): void {
 
 export function ensureGitHubSelectedV2(page: Page, appName = "GitHub"): Promise<boolean> {
   if (appName.toLowerCase() !== "github") return Promise.resolve(false);
+
   const lease = selectionLeases.get(page) ?? 0;
   if (lease > 0) {
     selectionLeases.set(page, lease - 1);
     return Promise.resolve(true);
   }
+
   const existing = running.get(page);
   if (existing) return existing;
+
   const promise = choose(page)
     .then((selected) => {
       if (selected) selectionLeases.set(page, (selectionLeases.get(page) ?? 0) + 1);
@@ -159,6 +201,7 @@ export function ensureGitHubSelectedV2(page: Page, appName = "GitHub"): Promise<
     })
     .catch(() => false)
     .finally(() => running.delete(page));
+
   running.set(page, promise);
   return promise;
 }
@@ -190,5 +233,6 @@ export async function submitMessageAfterGitHubSelection(page: Page, text: string
       return;
     }
   }
+
   await composer.press("Enter");
 }
