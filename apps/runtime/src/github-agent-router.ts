@@ -92,7 +92,10 @@ export function parseGitHubMcpContext(text: string): { modelText: string; displa
         if (route) finalAnswer = formatGitHubFinalAnswer(route, result);
       } catch { /* fall back to normal internal-message handling */ }
     }
-    return { modelText: text, displayText, finalAnswer };
+    // The MCP envelope must never reach ChatGPT. When the runtime has already
+    // produced the deterministic final answer, use that answer as the model
+    // input while keeping the original user message as the visible message.
+    return { modelText: finalAnswer ?? displayText, displayText, finalAnswer };
   } catch {
     return undefined;
   }
