@@ -10,14 +10,13 @@
     "test": "pnpm -r --if-present test",
     "lint": "pnpm -r --if-present lint",
     "dev:runtime": "tsx --import ./apps/runtime/src/chatgpt-network-trace.ts apps/runtime/src/server.ts",
-    "dev:runtime:trace": "cross-env BROWSER_CODING_AGENT_TRACE_CHATGPT=1 tsx --import ./apps/runtime/src/chatgpt-network-trace.ts apps/runtime/src/server.ts",
+    "dev:runtime:trace": "tsx --import ./apps/runtime/src/chatgpt-network-trace.ts apps/runtime/src/server.ts --trace-chatgpt",
     "dev:mcp": "pnpm --filter @browser-coding-agent/runtime dev:mcp",
     "build:extension": "pnpm --filter @browser-coding-agent/extension build"
   },
   "devDependencies": {
     "@types/node": "^22.15.21",
     "tsx": "^4.19.4",
-    "typescript": "^5.8.3",
-    "cross-env": "^7.0.3"
+    "typescript": "^5.8.3"
   }
 }
