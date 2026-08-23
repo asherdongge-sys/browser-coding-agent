@@ -11,15 +11,29 @@ export class BrowserTaskExecutor {
     if (!normalized) throw new Error("Agent goal must not be empty");
     const plan = this.plan(normalized);
     if (!plan.length) throw new Error("暂时无法把这个目标转换成浏览器操作。当前版本支持：打开 URL、搜索关键词、点击页面元素、输入文字、按键、滚动、读取页面和提取元素文本。");
+
     const results: string[] = [];
+    let lastCall: BrowserToolCall | undefined;
+    let lastResult: BrowserToolResult | undefined;
+
+    // Execute silently. The UI should receive the final task result, not a
+    // stream of internal browser calls/results.
     for (const call of plan) {
-      this.onEvent?.("call", call);
+      lastCall = call;
       const result = await this.execute(call);
-      this.onEvent?.("result", call, result);
-      if (!result.ok) throw new Error(result.error ?? `Browser tool failed: ${call.tool}`);
+      lastResult = result;
+      if (!result.ok) {
+        // Keep failures actionable without exposing the internal execution log.
+        throw new Error(result.error ?? `Browser tool failed: ${call.tool}`);
+      }
       if (result.result !== undefined) results.push(this.stringifyResult(result.result));
     }
-    return results.filter(Boolean).join("\n") || "浏览器任务已完成。";
+
+    const finalText = results.filter(Boolean).join("\n") || "浏览器任务已完成。";
+    if (lastCall && lastResult) {
+      this.onEvent?.("result", lastCall, { ok: true, result: finalText });
+    }
+    return finalText;
   }
 
   private plan(goal: string): BrowserToolCall[] {
