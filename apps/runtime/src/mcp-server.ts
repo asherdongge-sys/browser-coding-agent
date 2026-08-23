@@ -21,23 +21,29 @@ const browserTools = [
 ] as const;
 
 async function ensureGitHubClient(): Promise<void> {
-  const connection = await getGitHubConnection();
-  if (!connection) {
+  // Development/MVP path: prefer an explicitly supplied environment token.
+  // This makes the local MCP independent from the optional Browser Coding Agent OAuth UI.
+  const envToken = process.env.GITHUB_ACCESS_TOKEN?.trim() || process.env.GITHUB_TOKEN?.trim() || "";
+  const connection = envToken ? undefined : await getGitHubConnection();
+  const accessToken = envToken || connection?.accessToken || "";
+
+  if (!accessToken) {
     if (github) { await github.stop(); github = undefined; githubTools = []; githubAccessToken = ""; }
     return;
   }
-  if (github && githubAccessToken === connection.accessToken) return;
+
+  if (github && githubAccessToken === accessToken) return;
   await github?.stop();
-  github = new McpStdioClient(process.execPath, [githubServer], { GITHUB_ACCESS_TOKEN: connection.accessToken });
+  github = new McpStdioClient(process.execPath, [githubServer], { GITHUB_ACCESS_TOKEN: accessToken });
   await github.start();
   githubTools = await github.listTools();
-  githubAccessToken = connection.accessToken;
+  githubAccessToken = accessToken;
 }
 
 async function start() { await browser.start(); await ensureGitHubClient(); }
 
 async function call(name: string, args: any): Promise<any> {
-  if (name.startsWith("github.")) { await ensureGitHubClient(); if (!github) throw new Error("GitHub is not connected. Connect GitHub in Browser Coding Agent settings first."); return github.callTool(name, args); }
+  if (name.startsWith("github.")) { await ensureGitHubClient(); if (!github) throw new Error("GitHub is not connected. Set GITHUB_ACCESS_TOKEN or connect GitHub in Browser Coding Agent settings first."); return github.callTool(name, args); }
   if (name === "browser.run_task") { await browser.runTask(String(args.agentId), String(args.goal)); return { ok: true }; }
   if (name === "agent.list") return { agents: await browser.listAgents() };
   if (name === "agent.create") return { agent: await browser.createAgent(String(args.title ?? "Agent"), String(args.prompt ?? "")) };
