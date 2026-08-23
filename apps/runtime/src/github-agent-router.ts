@@ -1,23 +1,8 @@
-import { Locator } from "playwright";
 import type { McpStdioClient } from "@browser-coding-agent/mcp";
 
 export type GitHubMcpRoute = { tool: string; arguments: Record<string, unknown> };
 
 const INTERNAL_MCP_PREFIX = "::github-mcp-internal::";
-
-// Playwright's pressSequentially types one key at a time. For long ChatGPT prompts
-// that can exceed its default 30s action timeout, so switch long text to fill/paste.
-const originalPressSequentially = Locator.prototype.pressSequentially;
-if (!(globalThis as { __bcaLongInputPatched?: boolean }).__bcaLongInputPatched) {
-  Locator.prototype.pressSequentially = async function(this: Locator, text: string, options?: Parameters<Locator["pressSequentially"]>[1]): Promise<void> {
-    if (text.length >= 2000) {
-      await this.fill(text);
-      return;
-    }
-    await originalPressSequentially.call(this, text, options);
-  };
-  (globalThis as { __bcaLongInputPatched?: boolean }).__bcaLongInputPatched = true;
-}
 
 export function planGitHubMcpRoute(text: string): GitHubMcpRoute | undefined {
   const value = text.trim();
