@@ -24,6 +24,8 @@ async function getOAuthConfig(): Promise<GitHubOAuthConfig> {
 }
 
 export async function getGitHubConnection(): Promise<GitHubConnection | undefined> {
+  const envToken = process.env.GITHUB_ACCESS_TOKEN?.trim() || process.env.GITHUB_TOKEN?.trim() || "";
+  if (envToken) return { accessToken: envToken, login: undefined, name: undefined, connectedAt: 0 };
   try { const raw = await readFile(storeFile, "utf8"); return raw.trim() ? JSON.parse(raw) as GitHubConnection : undefined; } catch { return undefined; }
 }
 export async function saveGitHubConnection(connection: GitHubConnection): Promise<void> {
