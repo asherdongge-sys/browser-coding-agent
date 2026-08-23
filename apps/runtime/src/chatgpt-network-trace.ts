@@ -1,11 +1,9 @@
-import { Page } from "playwright";
+import type { Page } from "playwright";
 
 const TRACE_ENABLED = process.env.BROWSER_CODING_AGENT_TRACE_CHATGPT === "1" || process.argv.includes("--trace-chatgpt");
 const MAX_BODY = 12000;
 const INTERESTING = /chatgpt|openai|backend-api|conversation|response|completion|mcp|connector|tool/i;
 const SECRET_KEY = /authorization|cookie|set-cookie|token|secret|api[_-]?key|access[_-]?token/i;
-
-let installed = false;
 
 function safeJson(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(safeJson);
@@ -34,10 +32,10 @@ function shouldTrace(url: string): boolean {
   return INTERESTING.test(url);
 }
 
-function installPageTrace(page: Page): void {
+export function installChatGPTNetworkTrace(page: Page): void {
   if (!TRACE_ENABLED) return;
   const marker = Symbol.for("browser-coding-agent.chatgpt-network-trace");
-  const state = page as Page & { [marker]?: boolean };
+  const state = page as Page & { [key: symbol]: boolean };
   if (state[marker]) return;
   state[marker] = true;
 
@@ -81,14 +79,6 @@ function installPageTrace(page: Page): void {
     ws.on("socketerror", (error) => console.error(`[ChatGPTTrace][ws-error] ${url} ${error}`));
     ws.on("close", () => console.error(`[ChatGPTTrace][websocket-close] ${url}`));
   });
-}
 
-if (TRACE_ENABLED && !installed) {
-  installed = true;
-  const originalOn = Page.prototype.on;
-  Page.prototype.on = function patchedOn(this: Page, event: any, handler: any) {
-    installPageTrace(this);
-    return originalOn.call(this, event, handler);
-  } as typeof Page.prototype.on;
-  console.error("[ChatGPTTrace] enabled: observing ChatGPT/OpenAI network and WebSocket traffic (secrets redacted)");
+  console.error("[ChatGPTTrace] page trace installed");
 }
