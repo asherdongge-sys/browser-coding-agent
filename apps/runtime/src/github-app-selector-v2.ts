@@ -56,20 +56,17 @@ async function selectOnce(page: Page, name: string): Promise<boolean> {
   await c.click({ timeout: 5000 });
   if (await committed(c, name)) return true;
 
-  await c.pressSequentially(`@${name}`, { delay: 35 });
+  // Do not use pressSequentially here. It can wait up to 30s for Playwright's
+  // keyboard path when ChatGPT swaps/replaces the composer during an update.
+  // fill() updates the same input without depending on per-character keyboard
+  // events and is much more reliable for the short @GitHub trigger.
+  await c.fill(`@${name}`, { timeout: 5000 });
   await page.waitForTimeout(500);
   if (!onChatGPT(page)) return false;
 
-  // Do not assume that pressing Space selected the App. Verify the mention
-  // or an actual menu item before reporting success to the runtime.
-  if (!(await committed(c, name))) await c.press("Space").catch(() => undefined);
-
+  // ChatGPT may expose the App as an autocomplete item rather than committing
+  // the mention immediately. Prefer the visible item when available.
   for (let attempt = 0; attempt < 5; attempt += 1) {
-    await page.waitForTimeout(400);
-    if (!onChatGPT(page)) {
-      await page.goto(originalUrl, { waitUntil: "domcontentloaded", timeout: 10000 }).catch(() => undefined);
-      return false;
-    }
     if (await committed(c, name)) return true;
 
     if (await visibleOption(page, name)) {
@@ -84,10 +81,19 @@ async function selectOnce(page: Page, name: string): Promise<boolean> {
         if (await committed(c, name)) return true;
       }
     }
+
+    await page.waitForTimeout(300);
   }
 
-  await c.press("Control+A").catch(() => undefined);
-  await c.press("Backspace").catch(() => undefined);
+  // Some ChatGPT builds commit the autocomplete with Space instead of a click.
+  await c.press("Space", { timeout: 3000 }).catch(() => undefined);
+  await page.waitForTimeout(400);
+  if (await committed(c, name)) return true;
+
+  // If ChatGPT navigated while resolving the App, restore the original chat.
+  if (!onChatGPT(page)) {
+    await page.goto(originalUrl, { waitUntil: "domcontentloaded", timeout: 10000 }).catch(() => undefined);
+  }
   return false;
 }
 
