@@ -4,6 +4,8 @@ export type GitHubMcpRoute = { tool: string; arguments: Record<string, unknown>;
 
 const INTERNAL_MCP_PREFIX = "::github-mcp-internal::";
 const ORIGINAL_MESSAGE_PREFIX = "ORIGINAL_USER_MESSAGE_JSON:";
+const INTERNAL_MCP_HINT = "根据下面的 GitHub MCP 结果直接回答用户原始问题";
+const INTERNAL_MCP_RESULT_HINT = "工具结果：";
 
 export function planGitHubMcpRoute(text: string): GitHubMcpRoute | undefined {
   const value = text.trim();
@@ -46,8 +48,8 @@ export function formatGitHubMcpContext(route: GitHubMcpRoute, result: unknown): 
   return [
     INTERNAL_MCP_PREFIX,
     `${ORIGINAL_MESSAGE_PREFIX}${JSON.stringify(route.originalUserMessage)}`,
-    "根据下面的 GitHub MCP 结果直接回答用户原始问题。只输出最终答案，不要提及 MCP、工具调用、执行过程或内部上下文。",
-    `工具结果：${JSON.stringify(compactGitHubResult(route, result))}`,
+    `${INTERNAL_MCP_HINT}。只输出最终答案，不要提及 MCP、工具调用、执行过程或内部上下文。`,
+    `${INTERNAL_MCP_RESULT_HINT}${JSON.stringify(compactGitHubResult(route, result))}`,
   ].join("\n");
 }
 
@@ -66,5 +68,11 @@ export function parseGitHubMcpContext(text: string): { modelText: string; displa
 }
 
 export function isInternalGitHubMcpMessage(text: string): boolean {
-  return text.trimStart().startsWith(INTERNAL_MCP_PREFIX);
+  const value = text.trim();
+  return value.includes(INTERNAL_MCP_PREFIX) || value.includes(ORIGINAL_MESSAGE_PREFIX) || value.includes(INTERNAL_MCP_HINT) || value.includes(INTERNAL_MCP_RESULT_HINT);
+}
+
+export function getGitHubDisplayMessage(text: string): string | undefined {
+  const parsed = parseGitHubMcpContext(text);
+  return parsed?.displayText;
 }
