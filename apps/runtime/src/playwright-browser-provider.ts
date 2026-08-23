@@ -2,6 +2,7 @@ import { chromium, type BrowserContext, type Page } from "playwright";
 import type { BrowserAgent, BrowserAgentEvent, BrowserAgentMessage, BrowserProvider } from "./browser-provider.js";
 import { BrowserTaskExecutor } from "./browser-task-executor.js";
 import { startChatGPTPageSync, stopChatGPTPageSync } from "./chatgpt-page-sync.js";
+import { installChatGPTNetworkTrace } from "./chatgpt-network-trace.js";
 
 const CHATGPT_URL = "https://chatgpt.com/";
 const DASHBOARD_URL = process.env.BROWSER_CODING_AGENT_DASHBOARD_URL ?? "http://127.0.0.1:4317/";
@@ -92,8 +93,9 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     const agent = this.agents.get(agentId);
     if (!agent) throw new Error(`Agent ${agentId} not found`);
     const existing = this.initialization.get(agent.id);
-    if (existing) await existing;
-    else {
+    if (existing) {
+      await existing;
+    } else {
       const initialization = this.initializeAgent(agent);
       this.initialization.set(agent.id, initialization);
       await initialization.finally(() => {
@@ -122,7 +124,9 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
       if (kind === "call") {
         this.emit({ type: "agent.tool.call", agentId: agent.id, call });
         this.patch(agent, { status: "inspecting" });
-      } else if (result) this.emit({ type: "agent.tool.result", agentId: agent.id, call, result });
+      } else if (result) {
+        this.emit({ type: "agent.tool.result", agentId: agent.id, call, result });
+      }
       void this.keepDashboardForeground();
     });
     try {
@@ -137,7 +141,9 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
       this.emitTaskMessage(agent, `浏览器任务失败：${message}`);
       this.patch(agent, { status: "failed", lastError: message });
       throw error;
-    } finally { await this.keepDashboardForeground(); }
+    } finally {
+      await this.keepDashboardForeground();
+    }
   }
 
   async stop(): Promise<void> {
@@ -200,24 +206,12 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
         this.patch(agent, { status: "login-required", lastError: "请在托管的 Chromium 中完成 ChatGPT 登录，然后点击继续。" });
         return;
       }
-
-      const prompt = agent.initialPrompt?.trim();
-      agent.initialPrompt = undefined;
-
       this.patch(agent, { status: "ready", conversationUrl: agent.page.url(), lastError: "" });
-
-      // Do not start ChatGPT page sync for an empty Agent. The sync layer may
-      // observe or modify composer state during initialization.
-      if (!prompt) {
-        this.patch(agent, { status: "idle", conversationUrl: agent.page.url(), lastError: "" });
-        return;
-      }
-
-      await this.sendNow(agent, prompt);
-
-      // Only start page synchronization after the explicit initial message
-      // has been submitted.
       await startChatGPTPageSync(agent, agent.page, this.emit.bind(this), (patch) => this.patch(agent, patch));
+      const prompt = agent.initialPrompt;
+      agent.initialPrompt = undefined;
+      if (prompt) await this.sendNow(agent, prompt);
+      else this.patch(agent, { status: "idle", conversationUrl: agent.page.url(), lastError: "" });
     } catch (error) {
       if (!this.stopping) this.patch(agent, { status: "failed", lastError: error instanceof Error ? error.message : String(error) });
     } finally {
@@ -283,9 +277,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
 
   private async ensurePageReady(agent: ManagedAgent): Promise<void> {
     if (this.stopping || agent.page.isClosed()) throw new Error("Agent browser page is unavailable");
-    if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(agent.page.url())) {
-      await agent.page.goto(agent.conversationUrl || CHATGPT_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
-    }
+    if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(agent.page.url())) await agent.page.goto(agent.conversationUrl || CHATGPT_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
     await this.waitForComposerOrLogin(agent.page, 30000);
   }
 
@@ -298,14 +290,14 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
         const rect = node.getBoundingClientRect();
         return style.display !== "none" && style.visibility !== "hidden" && rect.width > 20 && rect.height > 10;
       });
-      return usable || /log in|sign in|登录|注册/i.test(body) || /\/auth\//i.test(location.pathname);
+      return usable || /log in|sign in|登录|注册/i.test(body) || /auth/i.test(location.pathname);
     }, undefined, { timeout: timeoutMs });
   }
 
   private async isAuthenticated(page: Page): Promise<boolean> {
     try {
       return await page.evaluate(() => {
-        if (/\/auth\//i.test(location.pathname) || /\/login/i.test(location.pathname)) return false;
+        if (/auth/i.test(location.pathname) || /login/i.test(location.pathname)) return false;
         return Array.from(document.querySelectorAll<HTMLElement>("[contenteditable='true'], textarea, [role='textbox']")).some((node) => {
           const style = getComputedStyle(node);
           const rect = node.getBoundingClientRect();
@@ -403,10 +395,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     return agent.messages;
   }
 
-  private pushMessage(agent: ManagedAgent, message: BrowserAgentMessage): void {
-    this.ensureMessages(agent).push(message);
-    void this.persist();
-  }
+  private pushMessage(agent: ManagedAgent, message: BrowserAgentMessage): void { this.ensureMessages(agent).push(message); void this.persist(); }
 
   private updateStreamingAssistant(agent: ManagedAgent, text: string): void {
     const messages = this.ensureMessages(agent);
@@ -423,29 +412,16 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     this.emit({ type: "agent.message", agentId: agent.id, role: "assistant", text, url: agent.page.url(), createdAt: Date.now(), streaming: false });
   }
 
-  private emitTaskMessage(agent: ManagedAgent, text: string): void {
-    this.emit({ type: "agent.message", agentId: agent.id, role: "assistant", text, url: agent.page.url(), createdAt: Date.now(), streaming: false });
-  }
-
+  private emitTaskMessage(agent: ManagedAgent, text: string): void { this.emit({ type: "agent.message", agentId: agent.id, role: "assistant", text, url: agent.page.url(), createdAt: Date.now(), streaming: false }); }
   private emit(event: BrowserAgentEvent): void { this.onEvent?.(event); }
-
-  private patch(agent: ManagedAgent, patch: Partial<BrowserAgent>): void {
-    Object.assign(agent, patch, { updatedAt: Date.now() });
-    this.emit({ type: "agent.updated", agent: this.publicAgent(agent) });
-  }
-
-  private publicAgent(agent: ManagedAgent): BrowserAgent {
-    const { page: _page, initialPrompt: _prompt, ...publicAgent } = agent;
-    return publicAgent;
-  }
-
+  private patch(agent: ManagedAgent, patch: Partial<BrowserAgent>): void { Object.assign(agent, patch, { updatedAt: Date.now() }); this.emit({ type: "agent.updated", agent: this.publicAgent(agent) }); }
+  private publicAgent(agent: ManagedAgent): BrowserAgent { const { page: _page, initialPrompt: _prompt, ...publicAgent } = agent; return publicAgent; }
   private async persist(): Promise<void> {}
 
   private observePage(page: Page): void {
+    installChatGPTNetworkTrace(page);
     page.on("close", () => {
-      for (const [agentId, agent] of this.agents) {
-        if (agent.page === page) stopChatGPTPageSync(agentId);
-      }
+      for (const [agentId, agent] of this.agents) if (agent.page === page) stopChatGPTPageSync(agentId);
     });
   }
 }
