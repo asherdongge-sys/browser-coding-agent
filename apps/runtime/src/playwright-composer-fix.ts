@@ -40,7 +40,9 @@ async function isChatGPTPage(page: Page): Promise<boolean> {
   try {
     const url = new URL(page.url());
     return url.protocol === "https:" && (url.hostname === "chatgpt.com" || url.hostname === "chat.openai.com") && !/^\/(apps|gpts)(?:\/|$)/i.test(url.pathname);
-  } catch { return false; }
+  } catch {
+    return false;
+  }
 }
 
 function patchAgent(self: unknown, agentId: string, changes: Record<string, unknown>): void {
@@ -75,8 +77,6 @@ provider.initializeAgent = async function initializeAgent(agent: Managed): Promi
     patchAgent(this, agent.id, { status: "opening-chatgpt", lastError: "" });
     if (agent.page.isClosed()) throw new Error("Agent browser page is unavailable");
 
-    // Navigate at most once. Repeated goto() calls while ChatGPT is restoring
-    // the conversation can trigger rate limits and destroy the JS context.
     if (!await isChatGPTPage(agent.page)) {
       await agent.page.goto("https://chatgpt.com/", { waitUntil: "domcontentloaded", timeout: 30000 });
     }
@@ -103,19 +103,33 @@ provider.initializeAgent = async function initializeAgent(agent: Managed): Promi
       return;
     }
 
-    patchAgent(this, agent.id, { status: "idle", conversationUrl: agent.page.url(), lastError: "" });
+    patchAgent(this, agent.id, { status: "selecting-github", conversationUrl: agent.page.url(), lastError: "" });
+    const githubSelected = await ensureGitHubSelectedV2(agent.page, "GitHub");
+    if (!githubSelected) {
+      patchAgent(this, agent.id, { status: "failed", conversationUrl: agent.page.url(), lastError: "GitHub connector could not be selected from the ChatGPT composer" });
+      return;
+    }
+
+    patchAgent(this, agent.id, { status: "ready", conversationUrl: agent.page.url(), lastError: "" });
     const emit = (this as unknown as { onEvent?: (event: unknown) => void }).onEvent as ((event: any) => void) | undefined;
     const patch = (changes: Partial<Managed>) => patchAgent(this, agent.id, changes as Record<string, unknown>);
     if (emit) await startChatGPTPageSync(agent as unknown as any, agent.page, emit as any, patch as any);
+
+    if (agent.prompt) {
+      const prompt = agent.prompt;
+      delete agent.prompt;
+      patchAgent(this, agent.id, { status: "sending", conversationUrl: agent.page.url(), lastError: "" });
+      await this.submitComposerAfterAppSelection(agent.page, prompt);
+      patchAgent(this, agent.id, { status: "waiting", conversationUrl: agent.page.url(), lastError: "" });
+    } else {
+      patchAgent(this, agent.id, { status: "idle", conversationUrl: agent.page.url(), lastError: "" });
+    }
   } catch (error) {
     patchAgent(this, agent.id, { status: "failed", lastError: error instanceof Error ? error.message : String(error), conversationUrl: agent.page.url() });
   }
 };
 
 provider.submitComposerAfterAppSelection = async function submitComposerAfterAppSelection(page: Page, text: string): Promise<void> {
-  // The selector stores the exact composer that committed the GitHub mention.
-  // Reusing it avoids the ChatGPT editor turning the mention into plain text
-  // or dropping the chip when focus is moved between two DOM locators.
   await submitMessageAfterGitHubSelection(page, text);
 };
 
@@ -126,8 +140,8 @@ provider.selectChatGPTApp = async function selectChatGPTApp(page: Page, appName:
   const agent = agentForPage(this, page);
   if (agent) {
     patchAgent(this, agent.id, selected
-      ? { status: "idle", lastError: "", conversationUrl: page.url() }
-      : { status: "failed", lastError: "GitHub App initialization failed", conversationUrl: page.url() });
+      ? { status: "ready", lastError: "", conversationUrl: page.url() }
+      : { status: "failed", lastError: "GitHub connector could not be selected", conversationUrl: page.url() });
   }
   return selected;
 };
