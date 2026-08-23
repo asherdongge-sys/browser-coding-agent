@@ -3,7 +3,7 @@ import { PlaywrightBrowserProvider } from "./playwright-browser-provider.js";
 import { ensureGitHubSelectedV2, primeGitHubSelectionLease, submitMessageAfterGitHubSelection } from "./github-app-selector-v2.js";
 import { startChatGPTPageSync } from "./chatgpt-page-sync.js";
 
-type Managed = { id: string; page: Page; status?: string; conversationUrl?: string; lastError?: string; updatedAt?: number; messages?: unknown[] };
+type Managed = { id: string; page: Page; status?: string; prompt?: string; conversationUrl?: string; lastError?: string; updatedAt?: number; messages?: unknown[] };
 type ProviderPrototype = {
   createAgent(title: string, prompt: string): Promise<unknown>;
   initializeAgent(agent: Managed): Promise<void>;
