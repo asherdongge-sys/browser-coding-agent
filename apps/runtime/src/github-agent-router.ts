@@ -1,8 +1,23 @@
+import { Locator } from "playwright";
 import type { McpStdioClient } from "@browser-coding-agent/mcp";
 
 export type GitHubMcpRoute = { tool: string; arguments: Record<string, unknown> };
 
 const INTERNAL_MCP_PREFIX = "::github-mcp-internal::";
+
+// Playwright's pressSequentially types one key at a time. For long ChatGPT prompts
+// that can exceed its default 30s action timeout, so switch long text to fill/paste.
+const originalPressSequentially = Locator.prototype.pressSequentially;
+if (!(globalThis as { __bcaLongInputPatched?: boolean }).__bcaLongInputPatched) {
+  Locator.prototype.pressSequentially = async function(this: Locator, text: string, options?: Parameters<Locator["pressSequentially"]>[1]): Promise<void> {
+    if (text.length >= 2000) {
+      await this.fill(text);
+      return;
+    }
+    await originalPressSequentially.call(this, text, options);
+  };
+  (globalThis as { __bcaLongInputPatched?: boolean }).__bcaLongInputPatched = true;
+}
 
 export function planGitHubMcpRoute(text: string): GitHubMcpRoute | undefined {
   const value = text.trim();
@@ -29,21 +44,13 @@ function compactGitHubResult(route: GitHubMcpRoute, result: unknown): unknown {
   if (route.tool === "github.list_repositories") {
     return records.slice(0, 50).map((item) => {
       const value = item && typeof item === "object" ? item as Record<string, unknown> : {};
-      return {
-        name: value.name,
-        full_name: value.full_name,
-        private: value.private,
-      };
+      return { name: value.name, full_name: value.full_name, private: value.private };
     });
   }
   if (route.tool === "github.search_repositories") {
     return records.slice(0, 20).map((item) => {
       const value = item && typeof item === "object" ? item as Record<string, unknown> : {};
-      return {
-        name: value.name,
-        full_name: value.full_name,
-        description: value.description,
-      };
+      return { name: value.name, full_name: value.full_name, description: value.description };
     });
   }
   return records;
