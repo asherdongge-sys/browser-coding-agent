@@ -1,10 +1,12 @@
 import type { Page } from "playwright";
 
 type Composer = ReturnType<Page["locator"]>;
+type ClipboardSnapshot = { html: string; text: string };
 
 const running = new WeakMap<Page, Promise<boolean>>();
 const composers = new WeakMap<Page, Composer>();
 const selectionLeases = new WeakMap<Page, number>();
+const clipboardSnapshots = new WeakMap<Page, ClipboardSnapshot>();
 
 const chat = (page: Page): boolean => {
   try {
@@ -58,12 +60,10 @@ async function isGitHubSelected(page: Page): Promise<boolean> {
         .reverse()
         .find(isVisible);
       if (!composer) return false;
-
       const selected = Array.from(composer.querySelectorAll<HTMLElement>(
         "[data-mention], [data-testid*='mention' i], [aria-label*='GitHub' i], [data-app-id*='github' i], [data-connector*='github' i]",
       )).some(isVisible);
       if (selected) return true;
-
       const text = `${composer.textContent ?? ""} ${(composer as HTMLTextAreaElement).value ?? ""}`;
       return /GitHub/i.test(text) && !/@GitHub/i.test(text);
     });
@@ -78,24 +78,43 @@ async function clearComposer(composer: Composer): Promise<void> {
   await composer.press("Backspace").catch(() => undefined);
 }
 
-/**
- * ChatGPT's current composer recognizes pasted @GitHub text as a connector mention,
- * while synthetic keyboard typing is treated as ordinary text. Use a real clipboard
- * paste event so ChatGPT owns the parsing/tokenization of the connector.
- */
-async function pasteText(page: Page, composer: Composer, text: string): Promise<boolean> {
+/** Read the user's existing clipboard without overwriting rich clipboard data. */
+async function readClipboard(page: Page): Promise<ClipboardSnapshot | undefined> {
   try {
-    await composer.click({ timeout: 5000 });
     const origin = new URL(page.url()).origin;
     await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin }).catch(() => undefined);
-    await page.evaluate(async (value) => {
-      await navigator.clipboard.writeText(value);
-    }, text);
-    await composer.press("Control+V");
-    return true;
+    return await page.evaluate(async () => {
+      if (!navigator.clipboard?.read) return undefined;
+      const items = await navigator.clipboard.read();
+      let html = "";
+      let text = "";
+      for (const item of items) {
+        if (item.types.includes("text/html")) {
+          html = await (await item.getType("text/html")).text();
+        }
+        if (item.types.includes("text/plain")) {
+          text = await (await item.getType("text/plain")).text();
+        }
+      }
+      return { html, text };
+    });
   } catch {
-    return false;
+    return undefined;
   }
+}
+
+/**
+ * Paste the existing OS clipboard as-is. Do NOT call clipboard.writeText here:
+ * that destroys the rich text / HTML representation that ChatGPT uses to turn
+ * a copied @GitHub connector token into a real connector mention.
+ */
+async function pasteExistingClipboard(page: Page, composer: Composer): Promise<ClipboardSnapshot | undefined> {
+  const snapshot = await readClipboard(page);
+  if (!snapshot) return undefined;
+  if (!/github/i.test(`${snapshot.text}\n${snapshot.html}`)) return undefined;
+  await composer.click({ timeout: 5000 });
+  await composer.press("Control+V");
+  return snapshot;
 }
 
 async function waitForParsedGitHub(page: Page, composer: Composer, timeoutMs = 5000): Promise<boolean> {
@@ -113,7 +132,9 @@ async function waitForParsedGitHub(page: Page, composer: Composer, timeoutMs = 5
 
 /**
  * Single-shot GitHub connector preparation.
- * Never opens the connector menu and never types @GitHub character-by-character.
+ * The important distinction is that we preserve the user's rich clipboard;
+ * writing plain "@GitHub" into the clipboard was the reason the previous
+ * implementation only inserted literal @GitHub text.
  */
 async function choose(page: Page): Promise<boolean> {
   const composer = await waitForComposer(page);
@@ -123,14 +144,15 @@ async function choose(page: Page): Promise<boolean> {
     return true;
   }
 
-  // This is intentionally a real paste. The user has verified that ChatGPT's
-  // paste parser converts the @GitHub marker into the connector token.
   await clearComposer(composer);
-  if (!await pasteText(page, composer, "@GitHub ")) return false;
+  const snapshot = await pasteExistingClipboard(page, composer);
+  if (!snapshot) {
+    console.warn("[BrowserCodingAgent] GitHub connector requires the rich @GitHub clipboard token; plain-text @GitHub paste is intentionally disabled");
+    return false;
+  }
+  clipboardSnapshots.set(page, snapshot);
   if (await waitForParsedGitHub(page, composer)) return true;
 
-  // Do not retry with keyboard input or connector-menu clicks: those paths were
-  // producing duplicate GitHub mentions and navigation to the app detail page.
   return false;
 }
 
@@ -163,15 +185,16 @@ export async function submitMessageAfterGitHubSelection(page: Page, text: string
   if (!composer) throw new Error("ChatGPT composer is not available after selecting GitHub");
   if (!await isGitHubSelected(page)) throw new Error("GitHub connector is no longer selected in the ChatGPT composer");
 
-  // The most reliable path is another single real paste containing the connector
-  // marker and the actual prompt. ChatGPT parses this as one user message rather
-  // than receiving a separate @GitHub keyboard turn followed by the prompt.
-  await clearComposer(composer);
-  if (!await pasteText(page, composer, `@GitHub ${text}`)) {
-    throw new Error("Unable to paste GitHub connector message into the ChatGPT composer");
-  }
-  if (!await waitForParsedGitHub(page, composer, 5000)) {
-    throw new Error("ChatGPT did not parse @GitHub as a connector in the composer");
+  // Do NOT clear and re-paste "@GitHub". That destroys the connector token.
+  // The token is already present in the composer from the rich clipboard paste.
+  // Append the actual prompt as plain text so the final message remains one
+  // composer submission containing the already-selected GitHub connector.
+  await composer.click({ timeout: 5000 });
+  await composer.press("End").catch(() => undefined);
+  await composer.pressSequentially(` ${text}`, { delay: 2 });
+
+  if (!await isGitHubSelected(page)) {
+    throw new Error("GitHub connector was lost while composing the message");
   }
 
   for (const selector of [
