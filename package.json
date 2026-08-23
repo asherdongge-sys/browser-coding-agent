@@ -9,7 +9,7 @@
     "typecheck": "pnpm build && pnpm -r typecheck",
     "test": "pnpm -r --if-present test",
     "lint": "pnpm -r --if-present lint",
-    "dev:runtime": "tsx apps/runtime/src/server.ts",
+    "dev:runtime": "tsx --import ./apps/runtime/src/chatgpt-network-trace.ts apps/runtime/src/server.ts",
     "dev:mcp": "pnpm --filter @browser-coding-agent/runtime dev:mcp",
     "build:extension": "pnpm --filter @browser-coding-agent/extension build"
   },
