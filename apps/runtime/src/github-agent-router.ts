@@ -2,6 +2,8 @@ import type { McpStdioClient } from "@browser-coding-agent/mcp";
 
 export type GitHubMcpRoute = { tool: string; arguments: Record<string, unknown> };
 
+const INTERNAL_MCP_PREFIX = "::github-mcp-internal::";
+
 export function planGitHubMcpRoute(text: string): GitHubMcpRoute | undefined {
   const value = text.trim();
   if (!/github/i.test(value) && !/仓库|代码仓库|pull request|拉取请求|issue|提交|commit|分支/.test(value)) return undefined;
@@ -21,12 +23,40 @@ export async function executeGitHubMcpRoute(client: McpStdioClient, route: GitHu
   return result.structuredContent ?? result.content ?? result;
 }
 
+function compactGitHubResult(route: GitHubMcpRoute, result: unknown): unknown {
+  const records = Array.isArray(result) ? result : undefined;
+  if (!records) return result;
+  if (route.tool === "github.list_repositories") {
+    return records.slice(0, 50).map((item) => {
+      const value = item && typeof item === "object" ? item as Record<string, unknown> : {};
+      return {
+        name: value.name,
+        full_name: value.full_name,
+        private: value.private,
+      };
+    });
+  }
+  if (route.tool === "github.search_repositories") {
+    return records.slice(0, 20).map((item) => {
+      const value = item && typeof item === "object" ? item as Record<string, unknown> : {};
+      return {
+        name: value.name,
+        full_name: value.full_name,
+        description: value.description,
+      };
+    });
+  }
+  return records;
+}
+
 export function formatGitHubMcpContext(route: GitHubMcpRoute, result: unknown): string {
   return [
-    "本次请求已经由 Browser Coding Agent 本地 Runtime 通过 GitHub MCP 执行。",
-    `本地 MCP 工具：${route.tool}`,
-    "请只根据下面的 MCP 返回结果回答用户，不要调用任何 GitHub Connector 或其他外部工具。",
-    "MCP 返回结果：",
-    JSON.stringify(result),
+    INTERNAL_MCP_PREFIX,
+    "根据下面的 GitHub MCP 结果直接回答用户原始问题。只输出最终答案，不要提及 MCP、工具调用、执行过程或内部上下文。",
+    `工具结果：${JSON.stringify(compactGitHubResult(route, result))}`,
   ].join("\n");
+}
+
+export function isInternalGitHubMcpMessage(text: string): boolean {
+  return text.trimStart().startsWith(INTERNAL_MCP_PREFIX);
 }
