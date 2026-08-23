@@ -1,6 +1,6 @@
 import { Page } from "playwright";
 
-const TRACE_ENABLED = process.env.BROWSER_CODING_AGENT_TRACE_CHATGPT === "1";
+const TRACE_ENABLED = process.env.BROWSER_CODING_AGENT_TRACE_CHATGPT === "1" || process.argv.includes("--trace-chatgpt");
 const MAX_BODY = 12000;
 const INTERESTING = /chatgpt|openai|backend-api|conversation|response|completion|mcp|connector|tool/i;
 const SECRET_KEY = /authorization|cookie|set-cookie|token|secret|api[_-]?key|access[_-]?token/i;
