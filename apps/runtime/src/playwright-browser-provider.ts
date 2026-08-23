@@ -91,6 +91,22 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     await this.send(agent, text, githubContext?.displayText);
   }
 
+  async recordAnswer(agentId: string, userText: string, assistantText: string): Promise<void> {
+    const agent = this.agents.get(agentId);
+    if (!agent) throw new Error(`Agent ${agentId} not found`);
+    const user = userText.trim();
+    const answer = assistantText.trim();
+    if (!user || !answer) throw new Error("Both userText and assistantText are required");
+    const createdAt = Date.now();
+    this.ensureMessages(agent).push({ role: "user", text: user, createdAt });
+    this.emit({ type: "agent.message", agentId: agent.id, role: "user", text: user, url: agent.page.url(), createdAt, streaming: false });
+    const answerCreatedAt = Date.now();
+    this.ensureMessages(agent).push({ role: "assistant", text: answer, createdAt: answerCreatedAt });
+    this.emit({ type: "agent.message", agentId: agent.id, role: "assistant", text: answer, url: agent.page.url(), createdAt: answerCreatedAt, streaming: false });
+    this.patch(agent, { status: "idle", conversationUrl: agent.page.url(), lastError: "" });
+    await this.persist();
+  }
+
   async resumeAgent(agentId: string): Promise<BrowserAgent> {
     const agent = this.agents.get(agentId);
     if (!agent) throw new Error(`Agent ${agentId} not found`);
