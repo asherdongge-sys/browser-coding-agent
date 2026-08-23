@@ -3,6 +3,7 @@ import type { McpStdioClient } from "@browser-coding-agent/mcp";
 export type GitHubMcpRoute = { tool: string; arguments: Record<string, unknown> };
 
 const INTERNAL_MCP_PREFIX = "::github-mcp-internal::";
+const ORIGINAL_MESSAGE_PREFIX = "ORIGINAL_USER_MESSAGE_JSON:";
 
 export function planGitHubMcpRoute(text: string): GitHubMcpRoute | undefined {
   const value = text.trim();
@@ -41,12 +42,27 @@ function compactGitHubResult(route: GitHubMcpRoute, result: unknown): unknown {
   return records;
 }
 
-export function formatGitHubMcpContext(route: GitHubMcpRoute, result: unknown): string {
+export function formatGitHubMcpContext(route: GitHubMcpRoute, result: unknown, originalUserMessage: string): string {
   return [
     INTERNAL_MCP_PREFIX,
+    `${ORIGINAL_MESSAGE_PREFIX}${JSON.stringify(originalUserMessage)}`,
     "根据下面的 GitHub MCP 结果直接回答用户原始问题。只输出最终答案，不要提及 MCP、工具调用、执行过程或内部上下文。",
     `工具结果：${JSON.stringify(compactGitHubResult(route, result))}`,
   ].join("\n");
+}
+
+export function parseGitHubMcpContext(text: string): { modelText: string; displayText: string } | undefined {
+  const value = text.trimStart();
+  if (!value.startsWith(INTERNAL_MCP_PREFIX)) return undefined;
+  const line = value.split("\n").find((item) => item.startsWith(ORIGINAL_MESSAGE_PREFIX));
+  if (!line) return undefined;
+  try {
+    const displayText = JSON.parse(line.slice(ORIGINAL_MESSAGE_PREFIX.length));
+    if (typeof displayText !== "string" || !displayText.trim()) return undefined;
+    return { modelText: text, displayText };
+  } catch {
+    return undefined;
+  }
 }
 
 export function isInternalGitHubMcpMessage(text: string): boolean {
