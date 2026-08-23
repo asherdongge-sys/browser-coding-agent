@@ -1,16 +1,41 @@
 import type { Page } from "playwright";
 import type { BrowserAgent, BrowserAgentMessage, BrowserAgentEvent } from "./browser-provider.js";
-import { isInternalGitHubMcpMessage } from "./github-agent-router.js";
+import { getGitHubDisplayMessage, isInternalGitHubMcpMessage } from "./github-agent-router.js";
 
 type Snapshot = { text: string; count: number };
 type SyncState = { timer: ReturnType<typeof setInterval>; user: Snapshot; assistant: Snapshot; pendingAssistant: string; assistantStableSince: number; syncRunning: boolean };
 
 const states = new Map<string, SyncState>();
-const POLL_INTERVAL_MS = 2500;
+const POLL_INTERVAL_MS = 500;
 const ASSISTANT_STABILITY_MS = 1200;
+
+async function sanitizeInternalUserMessages(page: Page): Promise<void> {
+  try {
+    await page.evaluate(() => {
+      const nodes = Array.from(document.querySelectorAll<HTMLElement>("[data-message-author-role='user']"));
+      for (const node of nodes) {
+        const text = (node.innerText || node.textContent || "").trim();
+        if (!text.includes("::github-mcp-internal::") && !text.includes("ORIGINAL_USER_MESSAGE_JSON:") && !text.includes("根据下面的 GitHub MCP 结果") && !text.includes("工具结果：")) continue;
+        const match = text.match(/ORIGINAL_USER_MESSAGE_JSON:([^\n]+)/);
+        if (match?.[1]) {
+          try {
+            const displayText = JSON.parse(match[1]);
+            if (typeof displayText === "string" && displayText.trim()) {
+              const target = node.querySelector<HTMLElement>(".whitespace-pre-wrap, [class*='whitespace-pre-wrap']") ?? node;
+              target.textContent = displayText;
+              continue;
+            }
+          } catch { /* keep hidden below */ }
+        }
+        node.style.display = "none";
+      }
+    });
+  } catch { /* page may be navigating */ }
+}
 
 async function snapshot(page: Page, role: "user" | "assistant"): Promise<Snapshot> {
   try {
+    if (role === "user") await sanitizeInternalUserMessages(page);
     return await page.evaluate((messageRole) => {
       const nodes = Array.from(document.querySelectorAll<HTMLElement>(`[data-message-author-role='${messageRole}']`));
       const texts = nodes.map((node) => (node.innerText || node.textContent || "").trim()).filter(Boolean);
@@ -26,6 +51,7 @@ function hasMessage(agent: BrowserAgent, role: BrowserAgentMessage["role"], text
 
 export async function startChatGPTPageSync(agent: BrowserAgent, page: Page, emit: (event: BrowserAgentEvent) => void, patch: (patch: Partial<BrowserAgent>) => void): Promise<void> {
   stopChatGPTPageSync(agent.id);
+  await sanitizeInternalUserMessages(page);
   const initialUser = await snapshot(page, "user");
   const initialAssistant = await snapshot(page, "assistant");
   const state: SyncState = { timer: undefined as unknown as ReturnType<typeof setInterval>, user: initialUser, assistant: initialAssistant, pendingAssistant: "", assistantStableSince: 0, syncRunning: false };
