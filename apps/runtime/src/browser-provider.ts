@@ -45,6 +45,7 @@ export type BrowserProvider = {
   listAgents(): Promise<BrowserAgent[]>;
   createAgent(title: string, prompt: string): Promise<BrowserAgent>;
   sendMessage(agentId: string, text: string): Promise<void>;
+  recordAnswer(agentId: string, userText: string, assistantText: string): Promise<void>;
   resumeAgent(agentId: string): Promise<BrowserAgent>;
   runTask(agentId: string, goal: string): Promise<void>;
   stop(): Promise<void>;
