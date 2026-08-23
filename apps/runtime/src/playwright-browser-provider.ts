@@ -1,6 +1,7 @@
 import { chromium, type BrowserContext, type Page } from "playwright";
 import type { BrowserAgent, BrowserAgentEvent, BrowserAgentMessage, BrowserProvider } from "./browser-provider.js";
 import { BrowserTaskExecutor } from "./browser-task-executor.js";
+import { ensureGitHubSelectedV2, submitMessageAfterGitHubSelection } from "./github-app-selector-v2.js";
 
 const CHATGPT_URL = "https://chatgpt.com/";
 const DASHBOARD_URL = process.env.BROWSER_CODING_AGENT_DASHBOARD_URL ?? "http://127.0.0.1:4317/";
@@ -165,7 +166,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
       if (!await this.isAuthenticated(agent.page)) { this.patch(agent, { status: "login-required", lastError: "请在托管的 Chromium 中完成 ChatGPT 登录，然后点击继续。" }); return; }
 
       this.patch(agent, { status: "initializing", conversationUrl: agent.page.url(), lastError: "" });
-      // Every agent selects GitHub exactly once during initialization, independent of prompt content.
+      // One initialization path owns GitHub selection for the whole agent lifecycle.
       if (!agent.githubSelected) {
         const selected = await this.selectChatGPTApp(agent.page, GITHUB_APP_NAME);
         if (!selected) throw new Error("GitHub connector could not be selected from the ChatGPT composer");
@@ -194,8 +195,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     await this.ensurePageReady(agent);
     if (!await this.isAuthenticated(agent.page)) throw new Error("ChatGPT is not logged in");
 
-    if (!githubAlreadySelected && this.looksLikeGitHubRequest(message) && !agent.githubSelected) {
-      // Never type "@GitHub" into the composer. If selection was lost, recover through the UI once.
+    if (!githubAlreadySelected && !agent.githubSelected) {
       const selected = await this.selectChatGPTApp(agent.page, GITHUB_APP_NAME);
       if (!selected) throw new Error("GitHub connector could not be selected from the ChatGPT composer");
       agent.githubSelected = true;
@@ -207,7 +207,12 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     this.patch(agent, { status: "sending", lastError: "" });
     this.pushMessage(agent, { role: "user", text: message, createdAt });
     this.emit({ type: "agent.message", agentId: agent.id, role: "user", text: message, url: agent.page.url(), createdAt });
-    await this.submitComposer(agent.page, message);
+
+    // The connector selector owns the composer token. Insert only the actual prompt here;
+    // never type @GitHub and never send a separate connector turn.
+    if (agent.githubSelected || githubAlreadySelected) await submitMessageAfterGitHubSelection(agent.page, message);
+    else await this.submitComposer(agent.page, message);
+
     this.patch(agent, { status: "waiting", conversationUrl: agent.page.url() });
     await this.waitForUserTurn(agent.page, previousUser, message);
     const response = await this.waitForAssistant(agent.page, previousAssistant, agent);
@@ -219,125 +224,13 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
   private looksLikeGitHubRequest(text: string): boolean { return /\bgithub\b|\brepositories?\b|\brepos?\b|\bpull requests?\b|\bissues?\b|\bcommits?\b|\bbranches?\b|仓库|代码仓库|GitHub|拉取请求|分支|提交记录/i.test(text); }
 
   private async selectChatGPTApp(page: Page, appName: string): Promise<boolean> {
-    try {
-      await this.waitForComposerOrLogin(page, 5000);
-      const target = await this.findComposer(page);
-      if (!target) return false;
-      const composer = page.locator(target.kind === "contenteditable" ? "[contenteditable='true']" : target.kind === "textarea" ? "textarea" : "[role='textbox']").nth(target.index);
-      if (!await this.isUsableElement(composer)) return false;
-      await composer.click({ timeout: 5000 });
-
-      // Use ChatGPT's connector UI. Do NOT type @GitHub: doing so creates a transient mention/input state and can produce a separate turn or repeated GitHub chips.
-      const menuOpened = await this.openConnectorMenu(page);
-      if (!menuOpened) return false;
-      return await this.clickConnectorMenuItem(page, appName);
-    } catch (error) {
+    if (appName.toLowerCase() !== GITHUB_APP_NAME.toLowerCase()) return false;
+    try { return await ensureGitHubSelectedV2(page, appName); }
+    catch (error) {
       console.warn(`[BrowserCodingAgent] ChatGPT connector selection failed: ${error instanceof Error ? error.message : String(error)}`);
       return false;
     }
   }
-
-  private async openConnectorMenu(page: Page): Promise<boolean> {
-    const selectors = [
-      'button[aria-label*="mention" i]',
-      'button[aria-label*="connector" i]',
-      'button[aria-label*="app" i]',
-      'button[aria-label*="tool" i]',
-      'button[data-testid*="mention" i]',
-      'button[data-testid*="connector" i]',
-      'button[data-testid*="app" i]',
-      'button[data-testid*="tool" i]',
-      'button[aria-label*="添加" i]',
-      'button[aria-label*="工具" i]',
-    ];
-
-    for (const selector of selectors) {
-      const buttons = page.locator(selector);
-      const count = await buttons.count().catch(() => 0);
-      for (let index = count - 1; index >= 0; index -= 1) {
-        const button = buttons.nth(index);
-        if (!await this.isUsableElement(button)) continue;
-        if (await button.isDisabled().catch(() => true)) continue;
-        await button.click({ timeout: 2500 }).catch(() => undefined);
-        if (await this.isConnectorMenuVisible(page)) return true;
-      }
-    }
-    return false;
-  }
-
-  private async isConnectorMenuVisible(page: Page): Promise<boolean> {
-    return page.evaluate(() => {
-      const visible = (node: Element) => {
-        const el = node as HTMLElement;
-        const style = getComputedStyle(el);
-        const rect = el.getBoundingClientRect();
-        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 2 && rect.height > 2;
-      };
-      return Array.from(document.querySelectorAll<HTMLElement>('[role="menu"], [role="listbox"], [role="dialog"], [data-radix-menu-content], [data-radix-popper-content-wrapper]')).some(visible);
-    }).catch(() => false);
-  }
-
-  private async clickConnectorMenuItem(page: Page, appName: string): Promise<boolean> {
-    const selectors = [
-      '[role="menuitem"]',
-      '[role="option"]',
-      '[role="menu"] button',
-      '[role="listbox"] button',
-      '[data-radix-menu-content] button',
-      '[data-radix-popper-content-wrapper] button',
-    ];
-
-    for (const selector of selectors) {
-      const items = page.locator(selector);
-      const count = await items.count().catch(() => 0);
-      for (let index = count - 1; index >= 0; index -= 1) {
-        const item = items.nth(index);
-        if (!await this.isUsableElement(item)) continue;
-        const text = await item.innerText().catch(() => "");
-        const aria = await item.getAttribute("aria-label").catch(() => null);
-        const value = `${text} ${aria ?? ""}`.trim();
-        if (!new RegExp(`\\b${this.escapeRegExp(appName)}\\b`, "i").test(value)) continue;
-        await item.click({ timeout: 3000 }).catch(async () => {
-          await item.locator("..").first().click({ timeout: 3000 });
-        });
-        if (await this.waitForSelectedConnector(page, appName, 2500)) return true;
-      }
-    }
-    return false;
-  }
-
-  private async waitForSelectedConnector(page: Page, appName: string, timeoutMs: number): Promise<boolean> {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      if (await this.isSelectedConnector(page, appName)) return true;
-      await page.waitForTimeout(250);
-    }
-    return false;
-  }
-
-  private async isSelectedConnector(page: Page, appName: string): Promise<boolean> {
-    return page.evaluate((name) => {
-      const visible = (node: HTMLElement) => {
-        const style = getComputedStyle(node);
-        const rect = node.getBoundingClientRect();
-        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 2 && rect.height > 2;
-      };
-      const composerNodes = Array.from(document.querySelectorAll<HTMLElement>("[contenteditable='true'], textarea, [role='textbox']"));
-      const composer = composerNodes.reverse().find(visible);
-      if (!composer) return false;
-
-      const scopes: HTMLElement[] = [composer];
-      let scope: HTMLElement | null = composer.parentElement;
-      for (let depth = 0; depth < 4 && scope; depth += 1, scope = scope.parentElement) scopes.push(scope);
-      for (const root of scopes) {
-        const nodes = Array.from(root.querySelectorAll<HTMLElement>("[data-mention], [data-testid*='mention' i], [data-testid*='connector' i], [aria-label], button, [role='button'], [contenteditable='false'], span"));
-        if (nodes.some((node) => visible(node) && `${node.getAttribute("aria-label") ?? ""} ${node.textContent ?? ""}`.toLowerCase().includes(name.toLowerCase()))) return true;
-      }
-      return false;
-    }, appName).catch(() => false);
-  }
-
-  private escapeRegExp(value: string): string { return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
 
   private async submitComposer(page: Page, text: string): Promise<void> {
     const target = await this.findComposer(page);
