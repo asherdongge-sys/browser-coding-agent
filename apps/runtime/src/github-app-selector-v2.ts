@@ -72,96 +72,49 @@ async function isGitHubSelected(page: Page): Promise<boolean> {
   }
 }
 
-function isConnectorMenuItemText(text: string): boolean {
-  return /GitHub/i.test(text) && !/(plugin|plugins|details|directory|管理|详情)/i.test(text);
+async function clearComposer(composer: Composer): Promise<void> {
+  await composer.click({ timeout: 5000 });
+  await composer.press("Control+A").catch(() => undefined);
+  await composer.press("Backspace").catch(() => undefined);
 }
 
-async function findOpenMenu(page: Page): Promise<Composer | undefined> {
-  for (const locator of [
-    page.locator("[role='menu']:visible"),
-    page.locator("[role='listbox']:visible"),
-    page.locator("[data-radix-menu-content]:visible"),
-    page.locator("[data-radix-popper-content-wrapper]:visible"),
-  ]) {
-    for (let index = await locator.count() - 1; index >= 0; index -= 1) {
-      const menu = locator.nth(index);
-      if (await visible(menu)) return menu;
-    }
+/**
+ * ChatGPT's current composer recognizes pasted @GitHub text as a connector mention,
+ * while synthetic keyboard typing is treated as ordinary text. Use a real clipboard
+ * paste event so ChatGPT owns the parsing/tokenization of the connector.
+ */
+async function pasteText(page: Page, composer: Composer, text: string): Promise<boolean> {
+  try {
+    await composer.click({ timeout: 5000 });
+    const origin = new URL(page.url()).origin;
+    await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin }).catch(() => undefined);
+    await page.evaluate(async (value) => {
+      await navigator.clipboard.writeText(value);
+    }, text);
+    await composer.press("Control+V");
+    return true;
+  } catch {
+    return false;
   }
-  return undefined;
 }
 
-/** Single-shot connector selection. Never click a second GitHub candidate. */
-async function clickGitHubMenuItem(page: Page, menu: Composer): Promise<boolean> {
-  const items = menu.locator("[role='menuitem'], [role='option'], button, a");
-  const count = await items.count();
-  let candidate: Composer | undefined;
-
-  for (let index = 0; index < count; index += 1) {
-    const item = items.nth(index);
-    if (!await visible(item)) continue;
-    const text = [
-      await item.innerText().catch(() => ""),
-      await item.getAttribute("aria-label").catch(() => null) ?? "",
-      await item.getAttribute("title").catch(() => null) ?? "",
-    ].join(" ");
-    if (isConnectorMenuItemText(text)) {
-      candidate = item;
-      break;
-    }
-  }
-
-  if (!candidate) return false;
-
-  const beforeUrl = page.url();
-  await candidate.click({ timeout: 2500 });
-
-  // After the click, only observe React state. Do not click another candidate.
-  const deadline = Date.now() + 4000;
+async function waitForParsedGitHub(page: Page, composer: Composer, timeoutMs = 5000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (!chat(page) || page.url() !== beforeUrl) return false;
-    if (await isGitHubSelected(page)) return true;
+    if (!chat(page)) return false;
+    if (await isGitHubSelected(page)) {
+      composers.set(page, composer);
+      return true;
+    }
     await page.waitForTimeout(200);
   }
   return false;
 }
 
-async function openConnectorMenu(page: Page, composer: Composer): Promise<boolean> {
-  const root = composer.locator("xpath=ancestor-or-self::*[self::form or @data-testid or @role='group'][1]");
-  const scope = await root.count() > 0 ? root : page.locator("body");
-  const buttons = scope.locator("button");
-  const count = await buttons.count();
-
-  for (let index = 0; index < count; index += 1) {
-    const button = buttons.nth(index);
-    if (!await visible(button)) continue;
-    const aria = await button.getAttribute("aria-label").catch(() => null);
-    const title = await button.getAttribute("title").catch(() => null);
-    const testId = await button.getAttribute("data-testid").catch(() => null);
-    const text = await button.innerText().catch(() => "");
-    const label = `${aria ?? ""} ${title ?? ""} ${testId ?? ""} ${text}`;
-    if (!/(^|\b)(app|apps|connector|tool|more|add|attach|应用|连接器|工具|更多)(\b|$)/i.test(label)) continue;
-
-    const beforeUrl = page.url();
-    const clicked = await button.click({ timeout: 2500 }).then(() => true).catch(() => false);
-    if (!clicked) continue;
-    await page.waitForTimeout(250);
-    if (!chat(page) || page.url() !== beforeUrl) return false;
-
-    const menu = await findOpenMenu(page);
-    if (!menu) {
-      await page.keyboard.press("Escape").catch(() => undefined);
-      continue;
-    }
-
-    const selected = await clickGitHubMenuItem(page, menu);
-    if (selected) return true;
-    await page.keyboard.press("Escape").catch(() => undefined);
-    return false;
-  }
-  return false;
-}
-
+/**
+ * Single-shot GitHub connector preparation.
+ * Never opens the connector menu and never types @GitHub character-by-character.
+ */
 async function choose(page: Page): Promise<boolean> {
   const composer = await waitForComposer(page);
   if (!composer) return false;
@@ -169,11 +122,15 @@ async function choose(page: Page): Promise<boolean> {
     composers.set(page, composer);
     return true;
   }
-  await composer.click({ timeout: 5000 }).catch(() => undefined);
-  if (await openConnectorMenu(page, composer)) {
-    composers.set(page, composer);
-    return true;
-  }
+
+  // This is intentionally a real paste. The user has verified that ChatGPT's
+  // paste parser converts the @GitHub marker into the connector token.
+  await clearComposer(composer);
+  if (!await pasteText(page, composer, "@GitHub ")) return false;
+  if (await waitForParsedGitHub(page, composer)) return true;
+
+  // Do not retry with keyboard input or connector-menu clicks: those paths were
+  // producing duplicate GitHub mentions and navigation to the app detail page.
   return false;
 }
 
@@ -206,12 +163,16 @@ export async function submitMessageAfterGitHubSelection(page: Page, text: string
   if (!composer) throw new Error("ChatGPT composer is not available after selecting GitHub");
   if (!await isGitHubSelected(page)) throw new Error("GitHub connector is no longer selected in the ChatGPT composer");
 
-  await composer.click({ timeout: 5000 });
-  await composer.evaluate((node, value) => {
-    (node as HTMLElement).focus();
-    document.execCommand("insertText", false, value);
-    node.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
-  }, text).catch(() => composer.pressSequentially(text, { delay: 5 }));
+  // The most reliable path is another single real paste containing the connector
+  // marker and the actual prompt. ChatGPT parses this as one user message rather
+  // than receiving a separate @GitHub keyboard turn followed by the prompt.
+  await clearComposer(composer);
+  if (!await pasteText(page, composer, `@GitHub ${text}`)) {
+    throw new Error("Unable to paste GitHub connector message into the ChatGPT composer");
+  }
+  if (!await waitForParsedGitHub(page, composer, 5000)) {
+    throw new Error("ChatGPT did not parse @GitHub as a connector in the composer");
+  }
 
   for (const selector of [
     'button[data-testid="send-button"]',
