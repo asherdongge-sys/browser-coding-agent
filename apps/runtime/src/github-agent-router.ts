@@ -44,16 +44,9 @@ function compactGitHubResult(route: GitHubMcpRoute, result: unknown): unknown {
   return records;
 }
 
-/**
- * GitHub MCP execution is intentionally kept out of the ChatGPT conversation.
- * The runtime already has the structured result, so for the currently supported
- * GitHub routes we can produce the final user-facing answer deterministically.
- * This prevents internal prompts/tool payloads from becoming user messages.
- */
 export function formatGitHubFinalAnswer(route: GitHubMcpRoute, result: unknown): string {
   const compact = compactGitHubResult(route, result);
   if (!Array.isArray(compact)) return typeof compact === "string" ? compact : JSON.stringify(compact);
-
   if (route.tool === "github.list_repositories") {
     const names = compact
       .map((item) => item && typeof item === "object" ? item as Record<string, unknown> : {})
@@ -62,7 +55,6 @@ export function formatGitHubFinalAnswer(route: GitHubMcpRoute, result: unknown):
     if (!names.length) return "当前没有查询到可访问的 GitHub 仓库。";
     return `你有权限访问的仓库前 ${names.length} 个如下：\n\n${names.map((name, index) => `${index + 1}. **${name}**`).join("\n")}`;
   }
-
   if (route.tool === "github.search_repositories") {
     const rows = compact
       .map((item) => item && typeof item === "object" ? item as Record<string, unknown> : {})
@@ -70,7 +62,6 @@ export function formatGitHubFinalAnswer(route: GitHubMcpRoute, result: unknown):
       .map((item, index) => `${index + 1}. **${String(item.name)}**${typeof item.full_name === "string" ? ` — \`${item.full_name}\`` : ""}`);
     return rows.length ? `找到 ${rows.length} 个相关仓库：\n\n${rows.join("\n")}` : "没有找到相关 GitHub 仓库。";
   }
-
   return JSON.stringify(compact);
 }
 
@@ -83,15 +74,25 @@ export function formatGitHubMcpContext(route: GitHubMcpRoute, result: unknown): 
   ].join("\n");
 }
 
-export function parseGitHubMcpContext(text: string): { modelText: string; displayText: string } | undefined {
+export function parseGitHubMcpContext(text: string): { modelText: string; displayText: string; finalAnswer?: string } | undefined {
   const value = text.trimStart();
   if (!value.startsWith(INTERNAL_MCP_PREFIX)) return undefined;
-  const line = value.split("\n").find((item) => item.startsWith(ORIGINAL_MESSAGE_PREFIX));
+  const lines = value.split("\n");
+  const line = lines.find((item) => item.startsWith(ORIGINAL_MESSAGE_PREFIX));
   if (!line) return undefined;
   try {
     const displayText = JSON.parse(line.slice(ORIGINAL_MESSAGE_PREFIX.length));
     if (typeof displayText !== "string" || !displayText.trim()) return undefined;
-    return { modelText: text, displayText };
+    const resultLine = lines.find((item) => item.startsWith(INTERNAL_MCP_RESULT_HINT));
+    let finalAnswer: string | undefined;
+    if (resultLine) {
+      try {
+        const result = JSON.parse(resultLine.slice(INTERNAL_MCP_RESULT_HINT.length));
+        const route = planGitHubMcpRoute(displayText);
+        if (route) finalAnswer = formatGitHubFinalAnswer(route, result);
+      } catch { /* fall back to normal internal-message handling */ }
+    }
+    return { modelText: text, displayText, finalAnswer };
   } catch {
     return undefined;
   }
