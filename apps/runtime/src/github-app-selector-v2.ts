@@ -4,6 +4,7 @@ type Composer = ReturnType<Page["locator"]>;
 
 const running = new WeakMap<Page, Promise<boolean>>();
 const composers = new WeakMap<Page, Composer>();
+const selectionLeases = new WeakMap<Page, number>();
 
 const chat = (page: Page): boolean => {
   try {
@@ -138,11 +139,24 @@ async function choose(page: Page): Promise<boolean> {
   return false;
 }
 
+export function primeGitHubSelectionLease(page: Page): void {
+  selectionLeases.set(page, (selectionLeases.get(page) ?? 0) + 1);
+}
+
 export function ensureGitHubSelectedV2(page: Page, appName = "GitHub"): Promise<boolean> {
   if (appName.toLowerCase() !== "github") return Promise.resolve(false);
+  const lease = selectionLeases.get(page) ?? 0;
+  if (lease > 0) {
+    selectionLeases.set(page, lease - 1);
+    return Promise.resolve(true);
+  }
   const existing = running.get(page);
   if (existing) return existing;
   const promise = choose(page)
+    .then((selected) => {
+      if (selected) selectionLeases.set(page, (selectionLeases.get(page) ?? 0) + 1);
+      return selected;
+    })
     .catch(() => false)
     .finally(() => running.delete(page));
   running.set(page, promise);
