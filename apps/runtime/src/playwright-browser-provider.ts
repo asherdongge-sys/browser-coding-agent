@@ -3,6 +3,7 @@ import type { BrowserAgent, BrowserAgentEvent, BrowserAgentMessage, BrowserProvi
 import { BrowserTaskExecutor } from "./browser-task-executor.js";
 import { startChatGPTPageSync, stopChatGPTPageSync } from "./chatgpt-page-sync.js";
 import { installChatGPTNetworkTrace } from "./chatgpt-network-trace.js";
+import { parseGitHubMcpContext } from "./github-agent-router.js";
 
 const CHATGPT_URL = "https://chatgpt.com/";
 const DASHBOARD_URL = process.env.BROWSER_CODING_AGENT_DASHBOARD_URL ?? "http://127.0.0.1:4317/";
@@ -86,7 +87,8 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     }
     const agent = this.agents.get(agentId);
     if (!agent) throw new Error(`Agent ${agentId} not found`);
-    await this.send(agent, text);
+    const githubContext = parseGitHubMcpContext(text);
+    await this.send(agent, text, githubContext?.displayText);
   }
 
   async resumeAgent(agentId: string): Promise<BrowserAgent> {
@@ -219,28 +221,31 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     }
   }
 
-  private async send(agent: ManagedAgent, text: string): Promise<void> {
+  private async send(agent: ManagedAgent, text: string, displayText?: string): Promise<void> {
     const initialization = this.initialization.get(agent.id);
     if (initialization) await initialization;
     if (agent.status === "failed" || agent.status === "login-required") throw new Error(agent.lastError || "Agent initialization is not ready");
-    await this.sendNow(agent, text);
+    await this.sendNow(agent, text, displayText);
   }
 
-  private async sendNow(agent: ManagedAgent, text: string): Promise<void> {
+  private async sendNow(agent: ManagedAgent, text: string, displayText?: string): Promise<void> {
     const message = text.trim();
-    if (!message) throw new Error("Message cannot be empty");
+    const visibleMessage = (displayText ?? text).trim();
+    if (!message || !visibleMessage) throw new Error("Message cannot be empty");
     await this.ensurePageReady(agent);
     if (!await this.isAuthenticated(agent.page)) throw new Error("ChatGPT is not logged in");
     const previousAssistant = await this.latestAssistant(agent.page);
     const previousUser = await this.latestUser(agent.page);
     const createdAt = Date.now();
     this.patch(agent, { status: "sending", lastError: "" });
-    this.pushMessage(agent, { role: "user", text: message, createdAt });
-    this.emit({ type: "agent.message", agentId: agent.id, role: "user", text: message, url: agent.page.url(), createdAt });
+    this.pushMessage(agent, { role: "user", text: visibleMessage, createdAt });
+    this.emit({ type: "agent.message", agentId: agent.id, role: "user", text: visibleMessage, url: agent.page.url(), createdAt });
     await this.submitComposer(agent.page, message);
     this.patch(agent, { status: "waiting", conversationUrl: agent.page.url() });
     await this.waitForUserTurn(agent.page, previousUser, message);
+    if (displayText) await this.replaceLatestUserMessage(agent.page, visibleMessage);
     const response = await this.waitForAssistant(agent.page, previousAssistant, agent);
+    if (displayText) await this.replaceLatestUserMessage(agent.page, visibleMessage);
     this.finalizeAssistant(agent, response);
     this.patch(agent, { status: "idle", conversationUrl: agent.page.url(), lastError: "" });
     await this.persist();
@@ -273,6 +278,16 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
       }
     }
     await composer.press("Enter");
+  }
+
+  private async replaceLatestUserMessage(page: Page, displayText: string): Promise<void> {
+    await page.evaluate((text) => {
+      const nodes = Array.from(document.querySelectorAll<HTMLElement>("[data-message-author-role='user']"));
+      const node = nodes.at(-1);
+      if (!node) return;
+      const target = node.querySelector<HTMLElement>(".whitespace-pre-wrap, [class*='whitespace-pre-wrap']");
+      if (target) target.textContent = text;
+    }, displayText);
   }
 
   private async ensurePageReady(agent: ManagedAgent): Promise<void> {
