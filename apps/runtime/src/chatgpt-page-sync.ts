@@ -1,5 +1,6 @@
 import type { Page } from "playwright";
 import type { BrowserAgent, BrowserAgentMessage, BrowserAgentEvent } from "./browser-provider.js";
+import { isInternalGitHubMcpMessage } from "./github-agent-router.js";
 
 type Snapshot = { text: string; count: number };
 type SyncState = { timer: ReturnType<typeof setInterval>; user: Snapshot; assistant: Snapshot; pendingAssistant: string; assistantStableSince: number; syncRunning: boolean };
@@ -42,7 +43,7 @@ async function syncOnce(agent: BrowserAgent, page: Page, state: SyncState, emit:
   const assistant = await snapshot(page, "assistant");
 
   if (user.count > state.user.count || (user.text && user.text !== state.user.text)) {
-    if (user.text && !hasMessage(agent, "user", user.text)) {
+    if (user.text && !isInternalGitHubMcpMessage(user.text) && !hasMessage(agent, "user", user.text)) {
       const createdAt = Date.now();
       agent.messages = agent.messages ?? [];
       agent.messages.push({ role: "user", text: user.text, createdAt });
