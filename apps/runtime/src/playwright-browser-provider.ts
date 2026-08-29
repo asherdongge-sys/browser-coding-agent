@@ -87,8 +87,19 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     }
     const agent = this.agents.get(agentId);
     if (!agent) throw new Error(`Agent ${agentId} not found`);
+    // Never type internal GitHub MCP envelopes into ChatGPT.
+    // Prefer deterministic final answer when available; otherwise fall back to original user text only.
     const githubContext = parseGitHubMcpContext(text);
-    await this.send(agent, text, githubContext?.displayText);
+    if (githubContext?.finalAnswer) {
+      await this.recordAnswer(agentId, githubContext.displayText, githubContext.finalAnswer);
+      return;
+    }
+    if (githubContext?.displayText) {
+      // Internal envelope without a parsed final answer: send only the original user message.
+      await this.send(agent, githubContext.displayText, githubContext.displayText);
+      return;
+    }
+    await this.send(agent, text);
   }
 
   async recordAnswer(agentId: string, userText: string, assistantText: string): Promise<void> {
@@ -273,8 +284,77 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     const composer = page.locator(target.kind === "contenteditable" ? "[contenteditable='true']" : target.kind === "textarea" ? "textarea" : "[role='textbox']").nth(target.index);
     if (!await this.isUsableElement(composer)) throw new Error("ChatGPT composer is not usable");
     await composer.click({ timeout: 5000 });
-    await composer.pressSequentially(text, { delay: 5 });
+    await this.fillComposer(page, composer, text, target.kind);
     await this.clickSendButton(page, composer);
+  }
+
+  /**
+   * Robust long-text input for ChatGPT composer.
+   * Prefer fill / clipboard over pressSequentially (which times out on long messages).
+   */
+  private async fillComposer(
+    page: Page,
+    composer: ReturnType<Page["locator"]>,
+    text: string,
+    kind: "contenteditable" | "textarea" | "role",
+  ): Promise<void> {
+    // Clear existing content first.
+    await composer.press(process.platform === "darwin" ? "Meta+A" : "Control+A").catch(() => undefined);
+    await composer.press("Backspace").catch(() => undefined);
+
+    if (kind === "textarea") {
+      // Native textarea: fill is reliable and does not synthesize key events one-by-one.
+      await composer.fill(text, { timeout: 15000 });
+      await composer.dispatchEvent("input");
+      await composer.dispatchEvent("change");
+      return;
+    }
+
+    // contenteditable / role=textbox: try clipboard paste first (best for long text).
+    try {
+      await page.evaluate(async (value) => {
+        await navigator.clipboard.writeText(value);
+      }, text);
+      await composer.press(process.platform === "darwin" ? "Meta+V" : "Control+V");
+      // Verify the value landed.
+      const current = await composer.innerText().catch(() => "");
+      if (current.trim().length >= Math.min(text.trim().length, 32)) {
+        await composer.dispatchEvent("input");
+        return;
+      }
+    } catch {
+      // Clipboard may be blocked in some Chromium profiles; fall through.
+    }
+
+    // Fallback: set via evaluate + InputEvent (works for React-controlled contenteditable).
+    await composer.evaluate((node, value) => {
+      const el = node as HTMLElement;
+      el.focus();
+      // Select all existing content.
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+      // Prefer insertText so React picks up the change.
+      const ok = document.execCommand("insertText", false, value);
+      if (!ok) {
+        el.textContent = value;
+      }
+      el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+    }, text);
+
+    // Final safety: if still short, chunked type (only for remaining short residual).
+    const after = (await composer.innerText().catch(() => "")).trim();
+    if (after.length < Math.min(text.trim().length, 16)) {
+      // Last-resort chunked pressSequentially with raised timeout.
+      const chunkSize = 200;
+      for (let i = 0; i < text.length; i += chunkSize) {
+        const chunk = text.slice(i, i + chunkSize);
+        await composer.pressSequentially(chunk, { delay: 2, timeout: 60000 });
+      }
+    }
   }
 
   private async clickSendButton(page: Page, composer: ReturnType<Page["locator"]>): Promise<void> {
