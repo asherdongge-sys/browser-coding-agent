@@ -9,7 +9,7 @@ import { ToolRegistry, WorkspaceManager, createFilesystemTools, createTerminalTo
 import { McpStdioClient } from "@browser-coding-agent/mcp";
 import type { BrowserAgentEvent, BrowserProvider } from "./browser-provider.js";
 import { PlaywrightBrowserProvider } from "./playwright-browser-provider.js";
-import { planGitHubMcpRoute, executeGitHubMcpRoute, formatGitHubMcpContext } from "./github-agent-router.js";
+import { planGitHubMcpRoute, executeGitHubMcpRoute, formatGitHubFinalAnswer } from "./github-agent-router.js";
 import { completeGitHubOAuth, createGitHubAuthorizeUrl, disconnectGitHub, getGitHubConnection, githubOAuthCallbackUrl, githubOAuthStatus } from "./github-oauth.js";
 
 export const DEFAULT_PORT = 4317;
@@ -108,8 +108,9 @@ export function createRuntimeServer(port = Number(process.env.BROWSER_CODING_AGE
     const client = await ensureGitHubMcp();
     const result = await executeGitHubMcpRoute(client, route);
     console.log(`[BrowserCodingAgent] Local MCP result for ${agentId}: ${JSON.stringify(result)}`);
-    const context = formatGitHubMcpContext(route, result);
-    await provider.sendMessage(agentId, context);
+    // Deterministic final answer — never inject internal MCP prompts into ChatGPT.
+    const finalAnswer = formatGitHubFinalAnswer(route, result);
+    await provider.recordAnswer(agentId, route.originalUserMessage, finalAnswer);
     return true;
   };
 
